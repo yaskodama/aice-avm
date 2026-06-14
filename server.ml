@@ -72,28 +72,47 @@ let lines_json () =
 
 let page = {html|<!doctype html>
 <html><head><meta charset="utf-8"><title>aice-avm graphics</title>
-<style>body{background:#101418;color:#cde;font-family:sans-serif;text-align:center;margin:0;padding:12px}
-canvas{background:#06100a;border:1px solid #2a3a30;border-radius:4px}</style></head>
+<style>html,body{margin:0;background:#0b0f12;color:#cde;font-family:sans-serif;text-align:center}
+h3{margin:8px}</style></head>
 <body>
-<h3>aice-avm — VM graphics</h3>
-<canvas id="c" width="480" height="400"></canvas>
-<div id="s" style="font-size:12px;color:#789"></div>
+<h3>aice-avm &mdash; VM graphics</h3>
+<canvas id="c" width="480" height="400" style="background:#06100a;border:1px solid #2a3a30"></canvas>
 <script>
-const col={1:'#ff5a5a',2:'#5aa0ff',3:'#5ad05a',4:'#ffd23c',0:'#dddddd'};
-const cv=document.getElementById('c'),x=cv.getContext('2d');
-async function tick(){
-  try{
-    const d=await (await fetch('/api/lines',{cache:'no-store'})).json();
-    cv.width=d.w; cv.height=d.h;
-    x.clearRect(0,0,cv.width,cv.height);
-    x.lineWidth=2; x.lineCap='round';
-    for(const L of d.lines){ x.strokeStyle=col[L[4]]||'#fff';
-      x.beginPath(); x.moveTo(L[0],L[1]); x.lineTo(L[2],L[3]); x.stroke(); }
-    document.getElementById('s').textContent=d.lines.length+' segment(s)';
-  }catch(e){}
-  setTimeout(tick,40);
+/* ES5 + XMLHttpRequest for maximum browser compatibility. Draws a test
+   pattern (vertex markers + status) immediately, so the canvas is visibly
+   alive even before any data arrives. */
+var cv=document.getElementById('c'), x=cv.getContext('2d');
+var W=cv.width, H=cv.height, lines=[], status='connecting...', tick=0;
+var col={1:'#ff5a5a',2:'#5aa0ff',3:'#5ad05a',4:'#ffd23c',0:'#dddddd'};
+var verts=[[150,100],[290,100],[290,240],[150,240]];
+function draw(){
+  tick++;
+  x.fillStyle='#06100a'; x.fillRect(0,0,W,H);
+  x.fillStyle='#34484c';
+  for(var i=0;i<verts.length;i++){ x.beginPath(); x.arc(verts[i][0],verts[i][1],3,0,7); x.fill(); }
+  x.lineWidth=4; x.lineCap='round';
+  for(var j=0;j<lines.length;j++){ var L=lines[j];
+    x.strokeStyle=col[L[4]]||'#ffffff';
+    x.beginPath(); x.moveTo(L[0],L[1]); x.lineTo(L[2],L[3]); x.stroke(); }
+  x.fillStyle='#7fc8a0'; x.font='12px monospace';
+  x.fillText('tick '+tick+'  segments '+lines.length+'  '+status, 8, 16);
 }
-tick();
+function poll(){
+  try{
+    var r=new XMLHttpRequest();
+    r.open('GET','/api/lines?t='+tick,true);
+    r.onreadystatechange=function(){
+      if(r.readyState===4){
+        if(r.status===200){ try{ var d=JSON.parse(r.responseText); lines=d.lines; status='ok'; }
+                            catch(e){ status='parse-error'; } }
+        else { status='http '+r.status; }
+      }
+    };
+    r.send();
+  }catch(e){ status='xhr-error'; }
+}
+draw();
+setInterval(function(){ poll(); draw(); }, 60);
 </script>
 </body></html>|html}
 
