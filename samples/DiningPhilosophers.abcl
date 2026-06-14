@@ -5,15 +5,16 @@
 //   * Each Fork is a mutex with a single waiter slot (a fork is shared by
 //     exactly two philosophers, so one waiter is enough).
 //   * Deadlock is avoided the classic way: each philosopher picks up its
-//     LOWER-numbered fork first (philosopher 4 therefore grabs fork 0 before
-//     fork 4 — the asymmetry that breaks the cycle).
-//   * A Renderer actor redraws the whole scene every frame from colours the
-//     philosophers/forks push to it, so the shared graphics buffer never races.
+//     LOWER-numbered fork first (philosopher 4 grabs fork 0 before fork 4 —
+//     the asymmetry that breaks the cycle).
+//   * A Renderer actor redraws the whole scene every frame, so the shared
+//     graphics buffer never races.
 //
-// Colours (see the web page legend): philosopher think=2 blue, hungry=4 yellow,
-// eat=3 green; fork free=0 grey, held=1 red.  The VM has no arrays, so the
-// Renderer's setp/setf use small if-ladders and the pentagon coordinates are
-// hard-coded.
+// A held fork is drawn as an ARROW pointing at the philosopher holding it; a
+// free fork is a small grey segment at its place between two philosophers.
+// Philosopher colour = state: 2 blue think, 4 yellow hungry, 3 green eat.
+// "free" holder is encoded as 5 (no philosopher has index 5). The VM has no
+// arrays, so setp/setfork use small if-ladders and coordinates are hard-coded.
 
 class Main {
   var r = 0;
@@ -41,24 +42,26 @@ class Main {
 class Fork {
   var held = 0;
   var waiter = 0;
+  var widx = 0;
   var r = 0;
   var idx = 0;
   method setup(i, rend) { idx = i; r = rend; held = 0; waiter = 0; }
-  method take(phil) {
+  method take(phil, pidx) {
     if (held == 0) {
       held = 1;
-      send r.setf(idx, 1);          // red = held
+      send r.setfork(idx, pidx);    // arrow toward philosopher pidx
       send phil.acquired();
     } else {
-      waiter = phil;                // remember the one waiter
+      waiter = phil;                // remember the one waiter + its index
+      widx = pidx;
     }
   }
   method release() {
     if (waiter == 0) {
       held = 0;
-      send r.setf(idx, 0);          // grey = free
+      send r.setfork(idx, 5);       // 5 = free
     } else {
-      send r.setf(idx, 1);          // hand straight to the waiter
+      send r.setfork(idx, widx);    // hand straight to the waiter
       send waiter.acquired();
       waiter = 0;
       held = 1;
@@ -84,11 +87,11 @@ class Philosopher {
     send r.setp(idx, 2);            // blue = thinking
     wait(thinkt);
     send r.setp(idx, 4);            // yellow = hungry
-    send ff.take(self);
+    send ff.take(self, idx);
   }
   method acquired() {
     got = got + 1;
-    if (got == 1) { send sf.take(self); }
+    if (got == 1) { send sf.take(self, idx); }
     if (got == 2) {
       send r.setp(idx, 3);          // green = eating
       wait(eatt);
@@ -101,19 +104,20 @@ class Philosopher {
 }
 
 class Renderer {
-  var p0 = 0; var p1 = 0; var p2 = 0; var p3 = 0; var p4 = 0;
-  var f0 = 0; var f1 = 0; var f2 = 0; var f3 = 0; var f4 = 0;
+  var p0 = 0; var p1 = 0; var p2 = 0; var p3 = 0; var p4 = 0;   // philosopher colours
+  var f0 = 0; var f1 = 0; var f2 = 0; var f3 = 0; var f4 = 0;   // fork holder (5 = free)
+  var dx = 0; var dy = 0;                                       // arrow scratch
   method setp(i, c) {
     if (i == 0) { p0 = c; } if (i == 1) { p1 = c; } if (i == 2) { p2 = c; }
     if (i == 3) { p3 = c; } if (i == 4) { p4 = c; }
   }
-  method setf(i, c) {
-    if (i == 0) { f0 = c; } if (i == 1) { f1 = c; } if (i == 2) { f2 = c; }
-    if (i == 3) { f3 = c; } if (i == 4) { f4 = c; }
+  method setfork(i, h) {
+    if (i == 0) { f0 = h; } if (i == 1) { f1 = h; } if (i == 2) { f2 = h; }
+    if (i == 3) { f3 = h; } if (i == 4) { f4 = h; }
   }
   method run() {
     p0 = 2; p1 = 2; p2 = 2; p3 = 2; p4 = 2;
-    f0 = 0; f1 = 0; f2 = 0; f3 = 0; f4 = 0;
+    f0 = 5; f1 = 5; f2 = 5; f3 = 5; f4 = 5;
     send self.frame();
   }
   method frame() {
@@ -124,12 +128,57 @@ class Renderer {
     line(308, 305, 324, 305, p2); line(316, 297, 316, 313, p2);
     line(156, 305, 172, 305, p3); line(164, 297, 164, 313, p3);
     line(108, 160, 124, 160, p4); line(116, 152, 116, 168, p4);
-    // forks as short diagonal segments at the midpoints, colour = held/free
-    line(296, 109, 308, 121, f0);
-    line(334, 226, 346, 238, f1);
-    line(234, 299, 246, 311, f2);
-    line(134, 226, 146, 238, f3);
-    line(172, 109, 184, 121, f4);
+
+    // fork 0 between phil0(240,70) and phil1(364,160), base (302,115)
+    if (f0 == 0) { dx = 240 - 302; dy = 70 - 115; }
+    if (f0 == 1) { dx = 364 - 302; dy = 160 - 115; }
+    if (f0 < 5) {
+      line(302, 115, 302 + dx * 65 / 100, 115 + dy * 65 / 100, 1);
+      line(302 + dx * 65 / 100, 115 + dy * 65 / 100, 302 + dx * 45 / 100 - dy / 6, 115 + dy * 45 / 100 + dx / 6, 1);
+      line(302 + dx * 65 / 100, 115 + dy * 65 / 100, 302 + dx * 45 / 100 + dy / 6, 115 + dy * 45 / 100 - dx / 6, 1);
+    }
+    if (f0 == 5) { line(296, 109, 308, 121, 0); }
+
+    // fork 1 between phil1(364,160) and phil2(316,305), base (340,232)
+    if (f1 == 1) { dx = 364 - 340; dy = 160 - 232; }
+    if (f1 == 2) { dx = 316 - 340; dy = 305 - 232; }
+    if (f1 < 5) {
+      line(340, 232, 340 + dx * 65 / 100, 232 + dy * 65 / 100, 1);
+      line(340 + dx * 65 / 100, 232 + dy * 65 / 100, 340 + dx * 45 / 100 - dy / 6, 232 + dy * 45 / 100 + dx / 6, 1);
+      line(340 + dx * 65 / 100, 232 + dy * 65 / 100, 340 + dx * 45 / 100 + dy / 6, 232 + dy * 45 / 100 - dx / 6, 1);
+    }
+    if (f1 == 5) { line(334, 226, 346, 238, 0); }
+
+    // fork 2 between phil2(316,305) and phil3(164,305), base (240,305)
+    if (f2 == 2) { dx = 316 - 240; dy = 305 - 305; }
+    if (f2 == 3) { dx = 164 - 240; dy = 305 - 305; }
+    if (f2 < 5) {
+      line(240, 305, 240 + dx * 65 / 100, 305 + dy * 65 / 100, 1);
+      line(240 + dx * 65 / 100, 305 + dy * 65 / 100, 240 + dx * 45 / 100 - dy / 6, 305 + dy * 45 / 100 + dx / 6, 1);
+      line(240 + dx * 65 / 100, 305 + dy * 65 / 100, 240 + dx * 45 / 100 + dy / 6, 305 + dy * 45 / 100 - dx / 6, 1);
+    }
+    if (f2 == 5) { line(234, 299, 246, 311, 0); }
+
+    // fork 3 between phil3(164,305) and phil4(116,160), base (140,232)
+    if (f3 == 3) { dx = 164 - 140; dy = 305 - 232; }
+    if (f3 == 4) { dx = 116 - 140; dy = 160 - 232; }
+    if (f3 < 5) {
+      line(140, 232, 140 + dx * 65 / 100, 232 + dy * 65 / 100, 1);
+      line(140 + dx * 65 / 100, 232 + dy * 65 / 100, 140 + dx * 45 / 100 - dy / 6, 232 + dy * 45 / 100 + dx / 6, 1);
+      line(140 + dx * 65 / 100, 232 + dy * 65 / 100, 140 + dx * 45 / 100 + dy / 6, 232 + dy * 45 / 100 - dx / 6, 1);
+    }
+    if (f3 == 5) { line(134, 226, 146, 238, 0); }
+
+    // fork 4 between phil4(116,160) and phil0(240,70), base (178,115)
+    if (f4 == 4) { dx = 116 - 178; dy = 160 - 115; }
+    if (f4 == 0) { dx = 240 - 178; dy = 70 - 115; }
+    if (f4 < 5) {
+      line(178, 115, 178 + dx * 65 / 100, 115 + dy * 65 / 100, 1);
+      line(178 + dx * 65 / 100, 115 + dy * 65 / 100, 178 + dx * 45 / 100 - dy / 6, 115 + dy * 45 / 100 + dx / 6, 1);
+      line(178 + dx * 65 / 100, 115 + dy * 65 / 100, 178 + dx * 45 / 100 + dy / 6, 115 + dy * 45 / 100 - dx / 6, 1);
+    }
+    if (f4 == 5) { line(172, 109, 184, 121, 0); }
+
     wait(40);
     send self.frame();
   }
