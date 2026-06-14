@@ -30,7 +30,30 @@ natively on **Windows**, macOS and Linux.
 | `samples/`    | `PingPong.abcl`, `Rotate4Lines.abcl` |
 | `docs/AVM_FORMAT.md` | the `.avm` bytecode format + opcode table |
 
-## Quick start on Windows
+## Windows: clone & run (no toolchain needed)
+
+The fastest path — works even without OCaml installed, because a one-shot
+launcher downloads the prebuilt binaries from the latest release:
+
+```powershell
+git clone https://github.com/yaskodama/aice-avm.git
+cd aice-avm
+.\start.bat
+```
+
+`start.bat` builds from source if `dune` is present, otherwise grabs the
+prebuilt `server.exe` / `send.exe` from the [latest release](https://github.com/yaskodama/aice-avm/releases/latest),
+launches the receiver, and sends `samples\PingPong.abcl` to it. The receiver
+window prints the actors bouncing a counter (`a1: 15 … a2: 1`).
+
+> Using **Claude Code** on Windows? Just tell it to *clone
+> `https://github.com/yaskodama/aice-avm` and start it* — it follows
+> `CLAUDE.md` and runs `start.bat` for you. Try
+> `.\start.bat -Sample samples\Rotate4Lines.abcl` for the rotating demo.
+
+---
+
+## Quick start on Windows (build from source)
 
 ### 1. Install OCaml + dune (once)
 
