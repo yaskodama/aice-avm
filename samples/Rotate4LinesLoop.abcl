@@ -1,0 +1,37 @@
+// Rotate4LinesLoop.abcl — same as Rotate4Lines.abcl but rotates CONTINUOUSLY
+// (until the receiver is restarted), handy for watching the graphics window.
+// Four line segments, EACH ITS OWN ACTOR, rotating about the four vertices of
+// a square; a token ring (Main -> L0 -> L1 -> L2 -> L3 -> Main) serialises the
+// draws so the shared graphics buffer never races.
+class Main {
+  var l0 = 0; var l1 = 0; var l2 = 0; var l3 = 0; var n = 0; var maxf = 0;
+  method tick() {
+    l0 = new Line(); l1 = new Line(); l2 = new Line(); l3 = new Line();
+    send l0.setup(150, 100, 1);
+    send l1.setup(290, 100, 2);
+    send l2.setup(290, 240, 3);
+    send l3.setup(150, 240, 4);
+    send l0.link(l1, 0);
+    send l1.link(l2, 0);
+    send l2.link(l3, 0);
+    send l3.link(self, 1);
+    n = 0;
+    maxf = 100000000;   // effectively endless
+    send self.frame();
+  }
+  method frame() {
+    if (n < maxf) { cls(); send l0.draw(); }
+  }
+  method tock() { n = n + 1; wait(30); send self.frame(); }
+}
+class Line {
+  var cx = 0; var cy = 0; var col = 0; var dx = 0; var dy = 0; var nxt = 0; var last = 0;
+  method setup(x, y, c) { cx = x; cy = y; col = c; dx = 60; dy = 0; }
+  method link(a, isLast) { nxt = a; last = isLast; }
+  method draw() {
+    dx = dx - (dy / 10);
+    dy = dy + (dx / 10);
+    line(cx - dx, cy - dy, cx + dx, cy + dy, col);
+    if (last == 1) { send nxt.tock(); } else { send nxt.draw(); }
+  }
+}

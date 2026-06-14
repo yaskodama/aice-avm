@@ -58,7 +58,17 @@ animates the live segments. Try the four-rotating-segments demo:
 Four coloured line segments rotate about the four corners of a square, one
 segment **per actor**, exactly like the Xinu "VM graphics" window. (The browser
 auto-opens; pass `--no-open` to the receiver to disable that, then open the URL
-yourself.)
+yourself.) For a demo that rotates **endlessly**, send
+`samples/Rotate4LinesLoop.abcl` instead.
+
+> **Opening the window across a network or from WSL.** The receiver listens
+> dual-stack, so `http://localhost:<port>/` works for a *local* (native) run.
+> But when the receiver runs **inside WSL** reached via a Windows `netsh
+> portproxy`, the port-forward only forwards the machine's **LAN address** — so
+> open the browser at **`http://<LAN-IP>:<port>/`** (e.g. `http://192.168.3.32:8080/`),
+> not `localhost`. Find the LAN IP with `ipconfig` (the adapter whose gateway is
+> your router). Sending an actor to a remote receiver works the same way:
+> `send <LAN-IP>:<port> samples/Rotate4Lines.abcl`.
 
 > Using **Claude Code** on Windows? Just tell it to *clone
 > `https://github.com/yaskodama/aice-avm` and start it* — it follows
@@ -170,6 +180,19 @@ Senders can skip it (for benchmarks/scripts) with `--noask`, which appends
 ```
 dune exec ./send.exe -- 127.0.0.1:8080 samples/PingPong.abcl --noask
 ```
+
+## Samples
+
+| file | what it does |
+|------|--------------|
+| `samples/PingPong.abcl`         | two actors bounce a counter (text output) |
+| `samples/Rotate4Lines.abcl`     | four segments, one per actor, rotate about a square's corners (5 turns) |
+| `samples/Rotate4LinesLoop.abcl` | same, but rotates endlessly |
+| `samples/DiningPhilosophers.abcl` | the dining-philosophers problem — 5 Philosopher + 5 Fork actors, deadlock-free (ordered pickup), visualised: philosophers as plus-signs (blue=think, yellow=hungry, green=eat), forks as segments (grey=free, red=held) |
+
+Run one with, e.g. `./start.sh 8080 samples/DiningPhilosophers.abcl` (WSL/Linux)
+or `.\start.bat -Sample samples\DiningPhilosophers.abcl` (Windows), then watch
+the graphics window.
 
 ## Writing your own actor
 

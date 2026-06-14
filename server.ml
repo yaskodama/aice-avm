@@ -205,6 +205,23 @@ let handle rt fd =
   end;
   (try Unix.close fd with _ -> ())
 
+(* Listen dual-stack (IPv4 + IPv6) when possible, so http://localhost/ works
+   even when the OS resolves "localhost" to ::1.  Fall back to IPv4-only. *)
+let make_listen port =
+  try
+    let s = Unix.socket Unix.PF_INET6 Unix.SOCK_STREAM 0 in
+    Unix.setsockopt s Unix.SO_REUSEADDR true;
+    (try Unix.setsockopt s Unix.IPV6_ONLY false with _ -> ());
+    Unix.bind s (Unix.ADDR_INET (Unix.inet6_addr_any, port));
+    Unix.listen s 16;
+    (s, Printf.sprintf "[::]:%d (IPv4+IPv6)" port)
+  with _ ->
+    let s = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+    Unix.setsockopt s Unix.SO_REUSEADDR true;
+    Unix.bind s (Unix.ADDR_INET (Unix.inet_addr_any, port));
+    Unix.listen s 16;
+    (s, Printf.sprintf "0.0.0.0:%d (IPv4)" port)
+
 let () =
   Array.iteri (fun i a ->
     if i > 0 then
@@ -212,13 +229,11 @@ let () =
       else if a = "--no-open" then no_open := true
       else (try the_port := int_of_string a with _ -> ())) Sys.argv;
   let rt = Avm.create_runtime io in
-  let s = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-  Unix.setsockopt s Unix.SO_REUSEADDR true;
-  Unix.bind s (Unix.ADDR_INET (Unix.inet_addr_any, !the_port));
-  Unix.listen s 16;
-  Printf.printf "[aice-avm] receiver listening on 0.0.0.0:%d  (accept-prompt: %s)\n%!"
-    !the_port (if !ask_default then "on" else "off");
-  Printf.printf "[aice-avm] graphics window will open at http://localhost:%d/ when an actor draws.\n%!" !the_port;
+  let (s, bind_desc) = make_listen !the_port in
+  Printf.printf "[aice-avm] receiver listening on %s  (accept-prompt: %s)\n%!"
+    bind_desc (if !ask_default then "on" else "off");
+  Printf.printf "[aice-avm] graphics window: open  http://localhost:%d/  in your browser.\n%!" !the_port;
+  Printf.printf "[aice-avm] across a network / WSL port-forward, use the machine's LAN IP instead, e.g. http://<LAN-IP>:%d/\n%!" !the_port;
   Printf.printf "[aice-avm] send actors with:  send <thishost>:%d samples/Rotate4Lines.abcl\n%!" !the_port;
   while true do
     let (fd, _) = Unix.accept s in
