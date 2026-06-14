@@ -51,6 +51,26 @@ window prints the actors bouncing a counter (`a1: 15 … a2: 1`).
 > `CLAUDE.md` and runs `start.bat` for you. Try
 > `.\start.bat -Sample samples\Rotate4Lines.abcl` for the rotating demo.
 
+## WSL (Windows Subsystem for Linux) / Linux / macOS: clone & run
+
+WSL is Linux, so it uses the Linux launcher (`start.sh`), which builds with
+`dune` if present or else downloads the prebuilt **Linux** binaries from the
+latest release — no toolchain required:
+
+```bash
+git clone https://github.com/yaskodama/aice-avm.git
+cd aice-avm
+./start.sh                              # PingPong on port 8080
+./start.sh 8080 samples/Rotate4Lines.abcl   # rotating-segments demo
+```
+
+Both the receiver and sender run inside WSL (`127.0.0.1`), so no cross-network
+setup is needed — the `[vm]` output appears right in your terminal.
+
+> Only `curl` (or `wget`) is needed for the no-toolchain path; WSL Ubuntu has
+> `curl` by default. To build from source instead:
+> `sudo apt install -y opam && opam init -y && opam install -y dune && dune build`.
+
 ---
 
 ## Quick start on Windows (build from source)

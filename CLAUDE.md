@@ -7,8 +7,9 @@ Releases.
 
 ## To start it on Windows (the only step the user needs)
 
-After cloning, run **one** of these from the repo root:
+After cloning, run **one** of these from the repo root.
 
+**Windows (PowerShell / cmd):**
 ```powershell
 .\start.bat
 ```
@@ -16,6 +17,16 @@ or
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\start.ps1
 ```
+
+**WSL / Linux / macOS (bash):**
+```bash
+./start.sh                                  # PingPong
+./start.sh 8080 samples/Rotate4Lines.abcl   # rotating demo
+```
+`start.sh` builds with `dune` if present, else downloads the prebuilt **Linux**
+binaries (`server-linux-x86_64` / `send-linux-x86_64`) from the latest release.
+Pick `start.sh` when the user is in WSL/Ubuntu; pick `start.bat` for native
+Windows.
 
 `start.ps1` will, in order:
 1. Build with `dune` **if** OCaml/dune is installed; otherwise **download** the
