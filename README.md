@@ -181,6 +181,11 @@ Senders can skip it (for benchmarks/scripts) with `--noask`, which appends
 dune exec ./send.exe -- 127.0.0.1:8080 samples/PingPong.abcl --noask
 ```
 
+
+> **Each send replaces the previous scene** — the receiver stops the old
+> actors automatically when a new `.avm` arrives, so you never need to restart
+> it between demos.
+
 ## Samples
 
 | file | what it does |

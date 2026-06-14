@@ -75,6 +75,7 @@ let mbox_pop  b = Mutex.lock b.m;
 type actor = {
   id : int;
   cidx : int;
+  gen : int;                                (* generation; actors from older loads stop *)
   fields : int array;
   box : (int * string * int array) mbox;   (* sender, method, args *)
   mutable enq : int;
@@ -87,12 +88,13 @@ type runtime = {
   actors : (int, actor) Hashtbl.t;
   lock : Mutex.t;
   mutable next_id : int;
+  mutable gen : int;
   io : io;
 }
 
 let create_runtime io =
   { m = { strings = [||]; classes = [||] };
-    actors = Hashtbl.create 64; lock = Mutex.create (); next_id = 0; io }
+    actors = Hashtbl.create 64; lock = Mutex.create (); next_id = 0; gen = 0; io }
 
 let with_lock rt f = Mutex.lock rt.lock; let r = (try f () with e -> Mutex.unlock rt.lock; raise e) in Mutex.unlock rt.lock; r
 
@@ -179,10 +181,13 @@ let rec exec rt actor sender meth args =
     with Exit -> () | _ -> ())
 
 and actor_loop rt actor =
-  while actor.alive do
+  while actor.alive && actor.gen = rt.gen do
     let (s, meth, args) = mbox_pop actor.box in
-    actor.deq <- actor.deq + 1;
-    (try exec rt actor s meth args with _ -> ())
+    if actor.gen <> rt.gen then actor.alive <- false
+    else begin
+      actor.deq <- actor.deq + 1;
+      (try exec rt actor s meth args with _ -> ())
+    end
   done
 
 and spawn rt cidx =
@@ -190,16 +195,27 @@ and spawn rt cidx =
     let nfields = rt.m.classes.(cidx).nfields in
     let a = with_lock rt (fun () ->
       let id = rt.next_id in rt.next_id <- id + 1;
-      let a = { id; cidx; fields = Array.make (max nfields 1) 0;
+      let a = { id; cidx; gen = rt.gen; fields = Array.make (max nfields 1) 0;
                 box = mbox_create (); enq = 0; deq = 0; alive = true } in
       Hashtbl.replace rt.actors id a; a) in
     ignore (Thread.create (fun () -> actor_loop rt a) ());
     a.id
   end
 
+(* Stop and forget all current actors (called before loading a new module so a
+   fresh send replaces the previous scene without a server restart). *)
+and reset rt =
+  with_lock rt (fun () ->
+    rt.gen <- rt.gen + 1;
+    Hashtbl.iter (fun _ a -> a.alive <- false; mbox_push a.box (-1, "__stop", [||])) rt.actors;
+    Hashtbl.clear rt.actors;
+    rt.next_id <- 0)
+
 (* Load a .avm module, spawn its first class as a live actor, kick it with
    tick(), and return the spawned actor id (or -1). *)
 let loadrun rt (data : bytes) : int =
+  reset rt;                 (* stop the previous scene's actors *)
+  (try rt.io.on_cls () with _ -> ());   (* clear the graphics view *)
   (try rt.m <- read_module data with _ -> ());
   if Array.length rt.m.classes = 0 then -1
   else begin
