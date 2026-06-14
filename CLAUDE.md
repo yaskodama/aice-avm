@@ -43,6 +43,14 @@ The receiver window then prints the actors running, e.g.:
 [vm] a2: 1
 ```
 
+### Graphics window
+When an actor draws (`line`/`cls`), the receiver **auto-opens a graphics window**
+in the browser at `http://localhost:<port>/` (an HTML canvas animating the live
+segments). Run the rotating-segments demo with
+`.\start.bat -Sample samples\Rotate4Lines.abcl` (Windows) or
+`./start.sh 8080 samples/Rotate4Lines.abcl` (WSL/Linux). Pass `--no-open` to the
+receiver to suppress auto-open and open the URL manually.
+
 ### Options
 - Different demo: `powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -Sample samples\Rotate4Lines.abcl`
 - Different port: `... -Port 9000`

@@ -46,6 +46,20 @@ prebuilt `server.exe` / `send.exe` from the [latest release](https://github.com/
 launches the receiver, and sends `samples\PingPong.abcl` to it. The receiver
 window prints the actors bouncing a counter (`a1: 15 … a2: 1`).
 
+### Graphics window (rotating segments)
+
+When an actor draws (`line`/`cls`), the receiver **dynamically opens a graphics
+window** — your browser at `http://localhost:<port>/`, an HTML canvas that
+animates the live segments. Try the four-rotating-segments demo:
+
+```powershell
+.\start.bat -Sample samples\Rotate4Lines.abcl
+```
+Four coloured line segments rotate about the four corners of a square, one
+segment **per actor**, exactly like the Xinu "VM graphics" window. (The browser
+auto-opens; pass `--no-open` to the receiver to disable that, then open the URL
+yourself.)
+
 > Using **Claude Code** on Windows? Just tell it to *clone
 > `https://github.com/yaskodama/aice-avm` and start it* — it follows
 > `CLAUDE.md` and runs `start.bat` for you. Try
