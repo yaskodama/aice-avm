@@ -1,0 +1,38 @@
+// PingPongVM.abcl — integer-only PingPong for the Xinu dynamic actor VM (.avm).
+// Main (class 0) spawns Pinger + Ponger, links them, and serves a counter that
+// the two actors bounce down to 0, printing it on every hop.  (The full
+// PingPong.abcl uses strings / call wait / sender / top-level setup, which the
+// minimal kernel bytecode VM does not support yet — this is the VM-compatible
+// equivalent that runs on the already-flashed kernel.)
+class Main {
+  var p = 0;
+  var q = 0;
+  method tick() {
+    q = new Ponger();
+    p = new Pinger();
+    send p.setq(q);
+    send q.setp(p);
+    send p.serve(15);
+  }
+}
+
+class Pinger {
+  var peer = 0;
+  var left = 0;
+  method setq(x) { peer = x; }
+  method serve(n) { left = n; send peer.ping(left); }
+  method pong(n) {
+    print(n);
+    left = left - 1;
+    if (left > 0) { send peer.ping(left); }
+  }
+}
+
+class Ponger {
+  var peer = 0;
+  method setp(x) { peer = x; }
+  method ping(n) {
+    print(n);
+    send peer.pong(n);
+  }
+}

@@ -1,0 +1,15 @@
+(library
+ (name aiceavm)
+ (wrapped false)
+ (modules avm compile)
+ (libraries threads.posix))
+
+(executable
+ (name server)
+ (modules server)
+ (libraries aiceavm unix threads.posix))
+
+(executable
+ (name send)
+ (modules send)
+ (libraries aiceavm unix threads.posix))

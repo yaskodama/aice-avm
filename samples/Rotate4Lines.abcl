@@ -1,0 +1,80 @@
+// Rotate4LinesVM.abcl — four line segments, EACH ITS OWN ACTOR, rotating about
+// the four vertices of a square, drawn in the Xinu "VM graphics" window via the
+// dynamic actor VM (.avm).
+//
+//   square centre (220,170), half-size 70 -> vertices:
+//     V0 (150,100)  V1 (290,100)  V2 (290,240)  V3 (150,240)
+//   each Line actor pivots a segment of half-length 60 about its vertex.
+//
+// The kernel VM has one shared line buffer (cls clears it, line appends), so the
+// four actors must not draw at the same time.  Main drives a TOKEN RING per
+// frame:  Main.frame -> L0.draw -> L1.draw -> L2.draw -> L3.draw -> Main.tock,
+// i.e. exactly one actor draws at a time; Main clears once per frame and waits.
+//
+// Rotation is integer-only (no sin/cos): an area-preserving "symplectic" step
+//   dx = dx - dy/10 ; dy = dy + dx/10
+// rotates (dx,dy) about (0,0) on a bounded ellipse (~5.7 deg/frame).
+// NOTE: the VM does not run field initialisers (fields spawn 0); tick() sets up.
+class Main {
+  var l0 = 0;
+  var l1 = 0;
+  var l2 = 0;
+  var l3 = 0;
+  var n = 0;
+  var maxf = 0;
+  method tick() {
+    l0 = new Line();
+    l1 = new Line();
+    l2 = new Line();
+    l3 = new Line();
+    send l0.setup(150, 100, 1);
+    send l1.setup(290, 100, 2);
+    send l2.setup(290, 240, 3);
+    send l3.setup(150, 240, 4);
+    send l0.link(l1, 0);
+    send l1.link(l2, 0);
+    send l2.link(l3, 0);
+    send l3.link(self, 1);
+    n = 0;
+    maxf = 400;
+    send self.frame();
+  }
+  method frame() {
+    if (n < maxf) {
+      cls();
+      send l0.draw();
+    }
+  }
+  method tock() {
+    n = n + 1;
+    wait(30);
+    send self.frame();
+  }
+}
+
+class Line {
+  var cx = 0;
+  var cy = 0;
+  var col = 0;
+  var dx = 0;
+  var dy = 0;
+  var nxt = 0;
+  var last = 0;
+  method setup(x, y, c) {
+    cx = x;
+    cy = y;
+    col = c;
+    dx = 60;
+    dy = 0;
+  }
+  method link(a, isLast) {
+    nxt = a;
+    last = isLast;
+  }
+  method draw() {
+    dx = dx - (dy / 10);
+    dy = dy + (dx / 10);
+    line(cx - dx, cy - dy, cx + dx, cy + dy, col);
+    if (last == 1) { send nxt.tock(); } else { send nxt.draw(); }
+  }
+}
