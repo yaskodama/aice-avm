@@ -20,8 +20,28 @@ $ErrorActionPreference = "Stop"
 $repo = "yaskodama/aice-avm"
 
 # repo root = parent of this script's folder
-$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$script = $MyInvocation.MyCommand.Path
+$root = Split-Path -Parent (Split-Path -Parent $script)
 Set-Location $root
+
+# --- Self-update: check GitHub for a newer version before launching --------
+# Disable with $env:AICE_NO_UPDATE = "1". Non-destructive: a git checkout only
+# fast-forwards (never merges/rebases over local work); offline = skip.
+if ($env:AICE_NO_UPDATE -ne "1" -and $env:AICE_REEXEC -ne "1") {
+  if ((Test-Path (Join-Path $root ".git")) -and (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "[start] checking GitHub for updates..." -ForegroundColor Cyan
+    $before = (git rev-parse HEAD 2>$null)
+    git pull --ff-only 2>$null | Out-Null
+    $after = (git rev-parse HEAD 2>$null)
+    if ($before -and $after -and $before -ne $after) {
+      Write-Host "[start] updated $before -> $after — relaunching with the new version." -ForegroundColor Cyan
+      $env:AICE_REEXEC = "1"
+      & powershell -ExecutionPolicy Bypass -File $script -Port $Port -Sample $Sample
+      exit $LASTEXITCODE
+    }
+    Write-Host "[start] already up to date." -ForegroundColor Cyan
+  }
+}
 
 function Get-Binaries {
   if (Get-Command dune -ErrorAction SilentlyContinue) {
@@ -32,12 +52,20 @@ function Get-Binaries {
   $bin = Join-Path $root "bin"
   $srv = Join-Path $bin "server.exe"
   $snd = Join-Path $bin "send.exe"
-  if (-not (Test-Path $srv) -or -not (Test-Path $snd)) {
-    Write-Host "[start] dune not found — downloading prebuilt binaries from the latest release..." -ForegroundColor Cyan
+  $rel = Join-Path $bin ".release"
+  # Find the latest release tag and re-download the binaries if it changed.
+  $latest = $null
+  try { $latest = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest").tag_name } catch {}
+  $have = if (Test-Path $rel) { (Get-Content $rel -Raw).Trim() } else { "none" }
+  if ((-not (Test-Path $srv)) -or (-not (Test-Path $snd)) -or ($latest -and $latest -ne $have)) {
+    Write-Host "[start] downloading prebuilt binaries (release $(if($latest){$latest}else{'latest'})) from GitHub..." -ForegroundColor Cyan
     New-Item -ItemType Directory -Force -Path $bin | Out-Null
     $base = "https://github.com/$repo/releases/latest/download"
     Invoke-WebRequest "$base/server.exe" -OutFile $srv
     Invoke-WebRequest "$base/send.exe"   -OutFile $snd
+    if ($latest) { Set-Content -Path $rel -Value $latest }
+  } else {
+    Write-Host "[start] prebuilt binaries already up to date (release $have)." -ForegroundColor Cyan
   }
   return @($srv, $snd)
 }
