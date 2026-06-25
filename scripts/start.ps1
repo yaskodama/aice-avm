@@ -3,15 +3,17 @@
 #   * If OCaml/dune is installed, it builds from source.
 #   * Otherwise it downloads the prebuilt server.exe / send.exe from the
 #     latest GitHub release (no toolchain needed).
-#   * Then it starts the receiver, waits, and sends a sample actor to it.
+#   * Then it starts the receiver, which opens the Xinu desktop UI in your
+#     browser at http://localhost:PORT/ — load and run actors from there.
 #
 # Usage (from the repo root):
 #   powershell -ExecutionPolicy Bypass -File scripts\start.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -Port 8080
 #   powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -Port 8080 -Sample samples\Rotate4Lines.abcl
 
 param(
   [int]$Port = 8080,
-  [string]$Sample = "samples\PingPong.abcl"
+  [string]$Sample = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,15 +46,17 @@ $exes   = Get-Binaries
 $server = $exes[0]
 $send   = $exes[1]
 
-Write-Host "[start] launching receiver on port $Port (a new window opens)..." -ForegroundColor Green
+Write-Host "[start] launching receiver on port $Port (the desktop UI opens in your browser)..." -ForegroundColor Green
 $proc = Start-Process -FilePath $server -ArgumentList "$Port" -PassThru
 Start-Sleep -Seconds 2
 
-Write-Host "[start] sending $Sample ..." -ForegroundColor Green
-& $send "127.0.0.1:$Port" $Sample
+if ($Sample -ne "") {
+  Write-Host "[start] sending $Sample ..." -ForegroundColor Green
+  & $send "127.0.0.1:$Port" $Sample
+}
 
 Write-Host ""
-Write-Host "[start] receiver PID $($proc.Id) is running. Watch its window for [vm] output." -ForegroundColor Yellow
-Write-Host "[start] send more actors with:  $send 127.0.0.1:$Port samples\Rotate4Lines.abcl"
+Write-Host "[start] receiver PID $($proc.Id) is running — desktop UI at http://localhost:$Port/" -ForegroundColor Yellow
+Write-Host "[start] load actors from the UI, or:  $send 127.0.0.1:$Port samples\Rotate4Lines.abcl"
 Read-Host "[start] press Enter to stop the receiver"
 Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue

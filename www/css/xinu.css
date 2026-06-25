@@ -1,0 +1,132 @@
+/* Browser "Xinu desktop" simulator — multi-window WM + BASIC window. */
+.xinu-body {
+  margin: 0;
+  height: 100vh;
+  overflow: hidden;
+  background:
+    radial-gradient(1000px 600px at 80% -10%, rgba(94,177,255,0.18), transparent),
+    radial-gradient(800px 500px at 0% 100%, rgba(183,140,255,0.16), transparent),
+    #070b12;
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  color: #d8dee9;
+  user-select: none;
+}
+
+/* Top bar */
+.xinu-topbar {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0 0.9rem;
+  background: rgba(13,17,23,0.85);
+  border-bottom: 1px solid #232b38;
+  font-size: 12px;
+  backdrop-filter: blur(8px);
+}
+.xinu-topbar .logo { font-weight: 800; color: #5eb1ff; letter-spacing: 0.06em; }
+.xinu-topbar .spacer { flex: 1; }
+.xinu-topbar .who { color: #8b949e; }
+.xinu-topbar a { color: #8b949e; text-decoration: none; }
+.xinu-topbar a:hover { color: #fff; }
+.xinu-topbar .clock { color: #b78cff; }
+
+/* Desktop area */
+.xinu-desktop { position: relative; width: 100vw; height: calc(100vh - 30px - 34px); }
+
+/* Window */
+.xwin {
+  position: absolute;
+  min-width: 240px; min-height: 140px;
+  background: #0d1320;
+  border: 1px solid #2b3650;
+  border-radius: 9px;
+  box-shadow: 0 14px 40px rgba(0,0,0,0.5);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.xwin.active { border-color: #5eb1ff; box-shadow: 0 16px 50px rgba(94,177,255,0.25); }
+.xwin-title {
+  height: 26px; display: flex; align-items: center; gap: 0.5rem;
+  padding: 0 0.5rem; cursor: move;
+  background: linear-gradient(180deg,#182236,#121a2b);
+  border-bottom: 1px solid #2b3650; font-size: 12px;
+}
+.xwin.active .xwin-title { background: linear-gradient(180deg,#1d3050,#15233a); }
+.xwin-title .t { flex: 1; color: #cbd5e6; font-weight: 600; }
+.xwin-btn {
+  width: 13px; height: 13px; border-radius: 50%; border: none; cursor: pointer;
+}
+.xwin-btn.close { background: #ff5f56; }
+.xwin-btn.min { background: #ffbd2e; }
+.xwin-body { flex: 1; overflow: auto; padding: 0.6rem 0.7rem; font-size: 12.5px; line-height: 1.5; }
+.xwin-resize {
+  position: absolute; right: 0; bottom: 0; width: 16px; height: 16px;
+  cursor: nwse-resize; background:
+    linear-gradient(135deg, transparent 50%, #3b4757 50%, #3b4757 60%, transparent 60%, transparent 70%, #3b4757 70%, #3b4757 80%, transparent 80%);
+}
+
+/* Console / shell */
+.con-out { white-space: pre-wrap; }
+.con-line { white-space: pre-wrap; }
+.con-input { display: flex; align-items: center; gap: 0.3rem; margin-top: 0.2rem; }
+.con-input .ps1 { color: #56d364; }
+.con-input input {
+  flex: 1; background: transparent; border: none; outline: none;
+  color: #d8dee9; font-family: inherit; font-size: 12.5px;
+}
+.boot-ok { color: #56d364; }
+.boot-info { color: #8b949e; }
+
+/* Process table */
+.proc-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.proc-table th, .proc-table td { text-align: left; padding: 3px 8px; border-bottom: 1px solid #1d2636; }
+.proc-table th { color: #5eb1ff; }
+.state-curr { color: #56d364; }
+.state-ready { color: #d8dee9; }
+.state-wait { color: #8b949e; }
+.state-susp { color: #ffbd2e; }
+.actor-mark { color: #56d364; font-weight: 700; font-size: 11px; }
+.sys-mark { color: #8b949e; font-size: 11px; }
+
+/* BASIC window */
+.basic-wrap { display: flex; flex-direction: column; height: 100%; gap: 6px; }
+.basic-toolbar { display: flex; gap: 6px; flex-wrap: wrap; }
+.basic-toolbar button, .basic-toolbar select {
+  background: #182236; color: #d8dee9; border: 1px solid #2b3650;
+  border-radius: 6px; padding: 3px 9px; font-family: inherit; font-size: 11.5px; cursor: pointer;
+}
+.basic-toolbar button:hover { border-color: #5eb1ff; color: #fff; }
+.basic-split { display: flex; gap: 8px; flex: 1; min-height: 0; }
+.basic-code {
+  flex: 1; min-width: 0; resize: none;
+  background: #070b12; color: #e6edf3; border: 1px solid #2b3650; border-radius: 7px;
+  padding: 8px; font-family: inherit; font-size: 12px; line-height: 1.45; tab-size: 2;
+}
+.basic-right { width: 260px; display: flex; flex-direction: column; gap: 6px; }
+#basic-canvas { background: #000; border: 1px solid #2b3650; border-radius: 7px; width: 100%; image-rendering: pixelated; }
+.basic-output {
+  flex: 1; overflow: auto; background: #070b12; border: 1px solid #2b3650; border-radius: 7px;
+  padding: 6px 8px; font-size: 12px; white-space: pre-wrap; color: #9ece6a; min-height: 60px;
+}
+
+/* Taskbar */
+.xinu-taskbar {
+  height: 34px; display: flex; align-items: center; gap: 6px; padding: 0 8px;
+  background: rgba(13,17,23,0.9); border-top: 1px solid #232b38;
+  position: fixed; bottom: 0; left: 0; right: 0;
+}
+.task-btn {
+  background: #141c2b; color: #cbd5e6; border: 1px solid #2b3650; border-radius: 6px;
+  padding: 4px 12px; font-size: 11.5px; cursor: pointer; font-family: inherit;
+}
+.task-btn.active { background: #1d3050; border-color: #5eb1ff; color: #fff; }
+
+/* Access denied panel */
+.xinu-denied {
+  max-width: 460px; margin: 12vh auto; padding: 2rem;
+  background: #0d1320; border: 1px solid #2b3650; border-radius: 14px; text-align: center;
+}
+.xinu-denied h1 { color: #ff7b72; font-size: 1.3rem; margin: 0 0 0.6rem; }
+.xinu-denied p { color: #8b949e; font-size: 0.95rem; }
+.xinu-denied a { color: #5eb1ff; }

@@ -25,10 +25,33 @@ natively on **Windows**, macOS and Linux.
 |------|------|
 | `avm.ml`      | the **host VM**: loads a `.avm` module, runs its actors on threads + mailboxes (a port of the Xinu kernel's `abcl_vm_dispatch`) |
 | `compile.ml`  | a self-contained **AIPL `.abcl` → `.avm` compiler** (own lexer/parser/codegen) |
-| `server.ml`   | the **receiver**: `POST /actor/loadvm`, `GET /api/actors`; prints actor output to the console |
+| `server.ml`   | the **receiver**: serves the Xinu desktop UI from `www/`, accepts `POST /actor/loadvm` (raw `.avm`) and `/actor/loadsrc` (`.abcl` source → compile → run), exposes `GET /api/actors` / `/api/console` / `/api/lines` |
 | `send.ml`     | the **sender**: compiles an `.abcl` (or reads a `.avm`) and POSTs it to a receiver |
-| `samples/`    | `PingPong.abcl`, `Rotate4Lines.abcl` |
+| `www/`        | the **Xinu desktop UI** (HTML/CSS/JS) the receiver serves at `/` — Console, Processes, VM Graphics, Actor Loader |
+| `samples/`    | `PingPong.abcl`, `Rotate4Lines.abcl`, `Rotate4LinesLoop.abcl`, `DiningPhilosophers.abcl` |
 | `docs/AVM_FORMAT.md` | the `.avm` bytecode format + opcode table |
+
+## The Xinu desktop UI (opens automatically)
+
+Starting the receiver now opens a **Xinu / AIPL desktop** in your browser at
+`http://localhost:<port>/` — the same UI shipped on the Raspberry-Pi Xinu kernel,
+running here against the **real OCaml host VM**:
+
+* **Console** — live actor output (`/api/console`), the `[vm]` lines in your terminal.
+* **Processes** — the actors currently alive on the VM (`/api/actors`), each tagged ● ACTOR.
+* **VM Graphics** — a window that draws the actors' `line`/`cls` segments (`/api/lines`),
+  reproducing the on-device "actor-to-actor Blender display".
+* **Actor Loader** — paste/edit an actor and **send its `.abcl` source** (the server
+  compiles it with `Compile.compile_source` and runs it), or drop a raw `.avm`.
+
+So you can `git clone → ./start.sh` (or `start.bat`) and get a self-contained,
+download-and-run desktop app — no airilab.app, no cloud. Pass `--no-open` to the
+receiver to suppress the browser launch.
+
+> **AIPL VM subset.** The host VM runs the same integer-only actor subset as the
+> Xinu kernel: integers only (`print(n)` takes an int; expressions are fine), no
+> top-level statements (the VM auto-starts class 0 `Main.tick()`), and class
+> fields only (no method-local `var`). The Loader samples follow these rules.
 
 ## Windows: clone & run (no toolchain needed)
 

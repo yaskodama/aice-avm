@@ -25,10 +25,44 @@ let no_open = ref false
 let the_port = ref 8080
 
 (* ---- shared graphics state (updated by VM actor threads, read by /api/lines) ---- *)
-let gw = 480 and gh = 400
+let gw = 820 and gh = 640
 let glock = Mutex.create ()
 let glines : (int*int*int*int*int) list ref = ref []
 let gopened = ref false
+
+(* ---- shared console buffer (actor print output, read by /api/console) ---- *)
+let clock = Mutex.create ()
+let clog : (int * string) list ref = ref []   (* chronological; capped *)
+let ctotal = ref 0
+let push_console s =
+  Mutex.lock clock;
+  incr ctotal;
+  clog := !clog @ [(!ctotal, s)];
+  let n = List.length !clog in
+  if n > 500 then clog := List.filteri (fun i _ -> i >= n - 500) !clog;
+  Mutex.unlock clock
+let json_escape s =
+  let b = Buffer.create (String.length s + 8) in
+  String.iter (fun c -> match c with
+    | '"' -> Buffer.add_string b "\\\""
+    | '\\' -> Buffer.add_string b "\\\\"
+    | '\n' -> Buffer.add_string b "\\n"
+    | '\r' -> ()
+    | '\t' -> Buffer.add_string b "\\t"
+    | c when Char.code c < 0x20 -> Buffer.add_string b (Printf.sprintf "\\u%04x" (Char.code c))
+    | c -> Buffer.add_char b c) s;
+  Buffer.contents b
+let console_json since =
+  Mutex.lock clock; let ls = !clog and tot = !ctotal in Mutex.unlock clock;
+  let b = Buffer.create 256 in
+  Buffer.add_string b (Printf.sprintf "{\"total\":%d,\"lines\":[" tot);
+  let first = ref true in
+  List.iter (fun (i, s) -> if i > since then begin
+    if not !first then Buffer.add_char b ','; first := false;
+    Buffer.add_char b '"'; Buffer.add_string b (json_escape s); Buffer.add_char b '"'
+  end) ls;
+  Buffer.add_string b "]}";
+  Buffer.contents b
 
 let open_browser () =
   if !no_open || !gopened then () else begin
@@ -49,11 +83,13 @@ let open_browser () =
         (try ignore (Unix.create_process prog args Unix.stdin devnull devnull)
          with _ -> go t)
     in go cands;
-    Printf.printf "[aice-avm] graphics window: http://localhost:%d/\n%!" !the_port
+    Printf.printf "[aice-avm] opening desktop UI: http://localhost:%d/\n%!" !the_port
   end
 
 let io : Avm.io = {
-  Avm.on_print = (fun id s -> Printf.printf "[vm] a%d: %s\n%!" id s);
+  Avm.on_print = (fun id s ->
+    let line = Printf.sprintf "a%d: %s" id s in
+    Printf.printf "[vm] %s\n%!" line; push_console line);
   on_line = (fun _id x1 y1 x2 y2 col ->
     Mutex.lock glock; glines := (x1,y1,x2,y2,col) :: !glines; Mutex.unlock glock;
     open_browser ());
@@ -83,7 +119,7 @@ h3{margin:8px}</style></head>
    alive even before any data arrives. */
 var cv=document.getElementById('c'), x=cv.getContext('2d');
 var W=cv.width, H=cv.height, lines=[], status='connecting...', tick=0;
-var col={1:'#ff5a5a',2:'#5aa0ff',3:'#5ad05a',4:'#ffd23c',0:'#dddddd'};
+var col={0:'#000000',1:'#3060ff',2:'#30d040',3:'#30d0d0',4:'#e03030',5:'#e040e0',6:'#e0e040',7:'#f0f0f0',8:'#808080',9:'#80a0ff',10:'#80ff80',11:'#80ffff',12:'#ff8080',13:'#ff80ff',14:'#ffff80',15:'#ffffff'};
 var verts=[[150,100],[290,100],[290,240],[150,240]];
 function draw(){
   tick++;
@@ -116,6 +152,179 @@ setInterval(function(){ poll(); draw(); }, 60);
 </script>
 </body></html>|html}
 
+(* A Blender-like editor shell (dark theme, header tabs, toolbar, outliner,
+   properties, timeline) whose 3D viewport canvas renders the AIPL-drawn model
+   (polled from /api/lines).  The VM can only emit lines, so the editor chrome
+   lives here in HTML/CSS and the AIPL program supplies the wireframe. *)
+let editor_page = {ed|<!doctype html><html><head><meta charset="utf-8">
+<title>aice-avm — Blender-like editor</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:#1d1d1d;color:#c4c4c4;
+  font:11px/1.4 'Segoe UI',system-ui,sans-serif;overflow:hidden;user-select:none}
+#app{display:flex;flex-direction:column;height:100vh}
+.hdr{background:#303030;border-bottom:1px solid #161616;display:flex;align-items:center;height:24px;padding:0 6px;gap:14px}
+.hdr .logo{color:#e87d0d;font-weight:700}
+.hdr .menu{color:#c8c8c8}.hdr .menu span{margin-right:10px}
+.tabs{background:#282828;border-bottom:1px solid #161616;display:flex;height:22px;align-items:stretch}
+.tab{padding:3px 11px;color:#9a9a9a;border-right:1px solid #1c1c1c;line-height:16px}
+.tab.on{background:#4772b3;color:#fff}
+.tab:hover{background:#3a3a3a}
+.main{flex:1;display:flex;min-height:0}
+.toolbar{width:30px;background:#303030;border-right:1px solid #161616;display:flex;flex-direction:column;align-items:center;padding-top:4px;gap:2px}
+.tool{width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:#bcbcbc;border-radius:3px;font-size:13px}
+.tool.on{background:#4772b3;color:#fff}.tool:hover{background:#3c3c3c}
+.vp{flex:1;display:flex;flex-direction:column;min-width:0}
+.vphdr{height:24px;background:#2c2c2c;border-bottom:1px solid #161616;display:flex;align-items:center;padding:0 8px;gap:12px;color:#bcbcbc}
+.vphdr .grow{flex:1}
+.vphdr .shade{display:flex;gap:3px}
+.shade b{width:16px;height:16px;border-radius:50%;display:inline-block;border:1px solid #555}
+.shade .s1{background:#777}.shade .s2{background:#aaa}.shade .s3{background:radial-gradient(circle at 6px 5px,#ddd,#666)}.shade .s4{background:radial-gradient(circle at 6px 5px,#9bf,#247)}
+.shade .on{outline:2px solid #5a8de0}
+.canvasWrap{flex:1;position:relative;background:radial-gradient(ellipse at 50% 35%,#515559 0%,#393b3e 55%,#2b2c2e 100%);min-height:0}
+#vp{position:absolute;inset:0;width:100%;height:100%}
+.gizmo{position:absolute;top:8px;right:10px;width:44px;height:44px;border-radius:50%;background:rgba(40,40,40,.35)}
+.gizmo i{position:absolute;width:13px;height:13px;border-radius:50%;font-style:normal;font-size:9px;color:#111;text-align:center;line-height:13px;font-weight:700}
+.gizmo .x{background:#e0584e;left:30px;top:16px}.gizmo .y{background:#a3d34f;left:16px;top:2px}.gizmo .z{background:#5a87e0;left:16px;top:30px}
+.right{width:330px;background:#303030;border-left:1px solid #161616;display:flex;flex-direction:column}
+.outl{flex:1;display:flex;flex-direction:column;border-bottom:1px solid #161616;min-height:0}
+.rhdr{height:22px;background:#28282d;border-bottom:1px solid #161616;display:flex;align-items:center;padding:0 8px;color:#cfcfcf;gap:6px}
+.tree{flex:1;overflow:auto;background:#28282d;padding:3px 0}
+.row{padding:1px 8px;white-space:nowrap;color:#c2c2c2}
+.row.sel{background:#4772b3;color:#fff}
+.row .tri{color:#9a9a9a;margin-right:2px}
+.row .ic{margin-right:4px}
+.props{flex:1.25;display:flex;min-height:0}
+.ptabs{width:26px;background:#262626;display:flex;flex-direction:column;align-items:center;padding-top:4px;gap:3px;border-right:1px solid #161616}
+.ptab{width:20px;height:20px;display:flex;align-items:center;justify-content:center;color:#b0b0b0;border-radius:3px}
+.ptab.on{background:#4772b3;color:#fff}
+.pbody{flex:1;overflow:auto;padding:6px 8px}
+.psec{font-weight:600;color:#dadada;margin:6px 0 3px;border-bottom:1px solid #222;padding-bottom:2px}
+.fld{display:flex;justify-content:space-between;padding:2px 4px;margin:2px 0;background:#252525;border-radius:3px}
+.fld b{color:#9a9a9a;font-weight:400}.fld span{color:#d2d2d2}
+.tl{height:92px;background:#303030;border-top:1px solid #161616;display:flex;flex-direction:column}
+.tlhdr{height:24px;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid #161616;color:#c4c4c4}
+.tlhdr .pc{font-size:14px;letter-spacing:2px}
+.tlhdr .pc b{cursor:default}
+.tlhdr .fr{background:#252525;padding:1px 8px;border-radius:3px}
+.track{flex:1;position:relative;background:#252528;overflow:hidden}
+#tlcanvas{position:absolute;inset:0;width:100%;height:100%}
+.status{height:18px;background:#303030;border-top:1px solid #161616;display:flex;align-items:center;padding:0 10px;color:#8a8a8a;gap:14px}
+</style></head><body><div id="app">
+  <div class="hdr"><span class="logo">&#9650; Blender</span>
+    <span class="menu"><span>File</span><span>Edit</span><span>Render</span><span>Window</span><span>Help</span></span>
+  </div>
+  <div class="tabs">
+    <div class="tab">Layout</div><div class="tab">Modeling</div><div class="tab">Sculpt</div>
+    <div class="tab">UV Editing</div><div class="tab">Shading</div><div class="tab on">Animation</div>
+    <div class="tab">Rendering</div><div class="tab">Compositing</div><div class="tab">Scripting</div>
+  </div>
+  <div class="main">
+    <div class="toolbar">
+      <div class="tool on">&#9737;</div><div class="tool">&#10021;</div><div class="tool">&#8635;</div>
+      <div class="tool">&#9744;</div><div class="tool">&#9998;</div><div class="tool">&#10070;</div><div class="tool">+</div>
+    </div>
+    <div class="vp">
+      <div class="vphdr"><span>&#9776; View</span><span>Select</span><span>Object</span>
+        <span style="color:#dcdcdc">Object Mode &#9662;</span><span class="grow"></span>
+        <span class="shade"><b class="s1"></b><b class="s2 on"></b><b class="s3"></b><b class="s4"></b></span>
+      </div>
+      <div class="canvasWrap">
+        <canvas id="vp"></canvas>
+        <div class="gizmo"><i class="x">X</i><i class="y">Y</i><i class="z">Z</i></div>
+      </div>
+    </div>
+    <div class="right">
+      <div class="outl">
+        <div class="rhdr">&#9776; Outliner</div>
+        <div class="tree">
+          <div class="row"><span class="tri">&#9662;</span><span class="ic">&#128247;</span>Scene Collection</div>
+          <div class="row" style="padding-left:18px"><span class="tri">&#9662;</span><span class="ic">&#128193;</span>Collection</div>
+          <div class="row" style="padding-left:30px"><span class="ic">&#128247;</span>Camera</div>
+          <div class="row" style="padding-left:30px"><span class="ic">&#128161;</span>Light</div>
+          <div class="row sel" style="padding-left:30px"><span class="tri">&#9662;</span><span class="ic">&#9650;</span>MAKINA-7</div>
+          <div class="row" style="padding-left:46px"><span class="ic">&#9678;</span>Mesh</div>
+          <div class="row" style="padding-left:46px"><span class="ic">&#9737;</span>Armature</div>
+          <div class="row" style="padding-left:60px">Head</div>
+          <div class="row" style="padding-left:60px">Spine</div>
+          <div class="row" style="padding-left:60px">Arm.L</div>
+          <div class="row" style="padding-left:60px">Arm.R</div>
+          <div class="row" style="padding-left:60px">Leg.L</div>
+          <div class="row" style="padding-left:60px">Leg.R</div>
+        </div>
+      </div>
+      <div class="props">
+        <div class="ptabs">
+          <div class="ptab">&#9881;</div><div class="ptab">&#128249;</div><div class="ptab on">&#9723;</div>
+          <div class="ptab">&#9737;</div><div class="ptab">&#9650;</div><div class="ptab">&#127912;</div>
+        </div>
+        <div class="pbody">
+          <div class="psec">Object Properties &#8250; MAKINA-7</div>
+          <div class="psec">Transform</div>
+          <div class="fld"><b>Location X / Y / Z</b><span>0.0  0.0  0.0</span></div>
+          <div class="fld"><b>Rotation X / Y / Z</b><span id="rotz">0  0  0</span></div>
+          <div class="fld"><b>Scale X / Y / Z</b><span>1.0  1.0  1.0</span></div>
+          <div class="fld"><b>Dimensions</b><span>0.88 2.04 0.58</span></div>
+          <div class="psec">Statistics</div>
+          <div class="fld"><b>Vertices</b><span id="nv">--</span></div>
+          <div class="fld"><b>Edges</b><span id="ne">--</span></div>
+          <div class="fld"><b>Source</b><span>MAKINA-7.glb</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="tl">
+    <div class="tlhdr"><span class="pc"><b>&#9198;</b> <b>&#9194;</b> <b id="play" style="cursor:pointer">&#9205;</b> <b>&#9193;</b> <b>&#9197;</b></span>
+      <span class="fr">Frame: <b id="cf">1</b></span><span class="fr">Start 1</span><span class="fr">End 96</span>
+      <span style="flex:1"></span><span style="color:#8a8a8a">Action: Turntable</span>
+    </div>
+    <div class="track"><canvas id="tlcanvas"></canvas></div>
+  </div>
+  <div class="status"><span>aice-avm host VM</span><span>MAKINA-7.glb</span><span id="st">connecting...</span></div>
+</div>
+<script>
+var cv=document.getElementById('vp'), x=cv.getContext('2d');
+var tlc=document.getElementById('tlcanvas'), tx=tlc.getContext('2d');
+var lines=[], W=480, H=400, t=0, frame=0;
+var zoom=1, panx=0, pany=0, drag=false, lx=0, ly=0, paused=false;
+var COL={0:'#000000',1:'#3060ff',2:'#30d040',3:'#30d0d0',4:'#e03030',5:'#e040e0',6:'#e0e040',7:'#f0f0f0',8:'#808080',9:'#80a0ff',10:'#80ff80',11:'#80ffff',12:'#ff8080',13:'#ff80ff',14:'#ffff80',15:'#ffffff'};
+function fit(c){ var r=c.getBoundingClientRect(); if(c.width!=Math.round(r.width)||c.height!=Math.round(r.height)){c.width=r.width;c.height=r.height;} }
+function draw(){
+  fit(cv); var w=cv.width,h=cv.height; x.clearRect(0,0,w,h);
+  var sc=Math.min(w/W,h/H)*0.92*zoom, ox=(w-W*sc)/2+panx, oy=(h-H*sc)/2+pany;
+  x.lineCap='round';
+  for(var i=0;i<lines.length;i++){ var L=lines[i], cc=L[4];
+    x.strokeStyle=COL[cc]||'#cfcfcf'; x.lineWidth=(cc==7?1.3:1);
+    x.beginPath(); x.moveTo(ox+L[0]*sc,oy+L[1]*sc); x.lineTo(ox+L[2]*sc,oy+L[3]*sc); x.stroke(); }
+  fit(tlc); var tw=tlc.width,th=tlc.height; tx.clearRect(0,0,tw,th);
+  tx.strokeStyle='#3a3a40'; for(var k=0;k<=96;k+=8){var px=10+k*(tw-20)/96; tx.beginPath(); tx.moveTo(px,0); tx.lineTo(px,th); tx.stroke();}
+  tx.fillStyle='#8a8a8a'; tx.font='9px sans-serif'; for(var k2=0;k2<=96;k2+=16){var px2=10+k2*(tw-20)/96; tx.fillText(k2,px2-3,10);}
+  var ph=10+frame*(tw-20)/96; tx.fillStyle='#e0922a'; tx.fillRect(ph-1,0,2,th);
+}
+function poll(){
+  if(paused) return;
+  var r=new XMLHttpRequest(); r.open('GET','/api/lines?t='+(t++),true);
+  r.onreadystatechange=function(){ if(r.readyState==4 && r.status==200){ try{
+    var d=JSON.parse(r.responseText); W=d.w; H=d.h; lines=d.lines;
+    document.getElementById('st').textContent='live  '+lines.length+' segs';
+    document.getElementById('ne').textContent=lines.length;
+    document.getElementById('nv').textContent=Math.round(lines.length*0.5);
+    frame=(frame+1)%96; document.getElementById('cf').textContent=frame+1;
+    document.getElementById('rotz').textContent='0  '+Math.round(frame*360/96)+'  0';
+  }catch(e){} } }; r.send();
+}
+cv.addEventListener('wheel',function(e){ e.preventDefault(); zoom*=(e.deltaY<0?1.1:0.9); if(zoom<0.3)zoom=0.3; if(zoom>4)zoom=4; draw(); },{passive:false});
+cv.addEventListener('mousedown',function(e){ drag=true; lx=e.clientX; ly=e.clientY; });
+window.addEventListener('mouseup',function(){ drag=false; });
+window.addEventListener('mousemove',function(e){ if(drag){ panx+=e.clientX-lx; pany+=e.clientY-ly; lx=e.clientX; ly=e.clientY; draw(); } });
+var pb=document.getElementById('play');
+if(pb) pb.addEventListener('click',function(){ paused=!paused; pb.innerHTML=paused?'&#9205;':'&#9208;'; });
+var rows=document.querySelectorAll('.tree .row');
+for(var ri=0;ri<rows.length;ri++) rows[ri].addEventListener('click',function(){ for(var q=0;q<rows.length;q++)rows[q].classList.remove('sel'); this.classList.add('sel'); });
+draw(); setInterval(function(){ poll(); draw(); },66);
+window.addEventListener('resize',draw);
+</script></body></html>|ed}
+
 (* ---- HTTP plumbing ---- *)
 let find_sub s sub =
   let ls = String.length s and lu = String.length sub in
@@ -140,12 +349,54 @@ let content_length headers =
     (try int_of_string (Buffer.contents b) with _ -> 0)
   end
 
+let cors = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n"
 let http resp_ctype body =
-  Printf.sprintf "HTTP/1.0 200 OK\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
-    resp_ctype (String.length body) body
+  Printf.sprintf "HTTP/1.0 200 OK\r\nContent-Type: %s\r\nContent-Length: %d\r\n%sConnection: close\r\n\r\n%s"
+    resp_ctype (String.length body) cors body
+let http_preflight =
+  Printf.sprintf "HTTP/1.0 204 No Content\r\n%sContent-Length: 0\r\nConnection: close\r\n\r\n" cors
 let http_text = http "text/plain"
 let http_json = http "application/json"
 let http_html = http "text/html; charset=utf-8"
+
+let ends_with s suf =
+  let ls = String.length s and lf = String.length suf in
+  ls >= lf && String.sub s (ls - lf) lf = suf
+
+let read_file_opt p =
+  try let ic = open_in_bin p in
+    let n = in_channel_length ic in
+    let s = really_input_string ic n in close_in ic; Some s
+  with _ -> None
+
+let ctype_of p =
+  if ends_with p ".html" then "text/html; charset=utf-8"
+  else if ends_with p ".css" then "text/css"
+  else if ends_with p ".js" then "application/javascript"
+  else if ends_with p ".json" then "application/json"
+  else "application/octet-stream"
+
+(* Serve files from the www/ directory next to the receiver (the Xinu UI). *)
+let serve_static path =
+  let p = (match String.index_opt path '?' with Some i -> String.sub path 0 i | None -> path) in
+  let p = if p = "/" then "/index.html" else p in
+  if find_sub p ".." >= 0 then http_text "bad path"
+  else match read_file_opt ("www" ^ p) with
+    | Some body -> http (ctype_of p) body
+    | None -> Printf.sprintf "HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+(* Parse an integer query param, e.g. ?since=12 -> 12 (default 0). *)
+let int_param path name =
+  let key = name ^ "=" in
+  let i = find_sub path key in
+  if i < 0 then 0
+  else begin
+    let j = ref (i + String.length key) in
+    let n = String.length path in
+    let b = Buffer.create 8 in
+    while !j < n && path.[!j] >= '0' && path.[!j] <= '9' do Buffer.add_char b path.[!j]; incr j done;
+    (try int_of_string (Buffer.contents b) with _ -> 0)
+  end
 
 let ask_console nbytes =
   Printf.printf "[server] incoming actor binary: %d bytes — accept and run? [y/N] %!" nbytes;
@@ -182,15 +433,27 @@ let handle rt fd =
     let reqline = (match String.index_opt headers '\r' with
                    | Some i -> String.sub headers 0 i | None -> headers) in
     let path = (match String.split_on_char ' ' reqline with _ :: p :: _ -> p | _ -> "/") in
+    let meth = (match String.split_on_char ' ' reqline with m :: _ -> m | _ -> "GET") in
     let resp =
-      if starts_with path "/actor/loadvm" then begin
+      if meth = "OPTIONS" then http_preflight  (* CORS preflight *)
+      else if starts_with path "/actor/loadvm" then begin
         let skip = find_sub path "ask=0" >= 0 || find_sub path "noask" >= 0 in
         let accepted = if skip || not !ask_default then true else ask_console (String.length body) in
         let id = if accepted then Avm.loadrun rt (Bytes.of_string body) else -1 in
         http_text (Printf.sprintf "loadvm: body=%d accepted=%d spawned actor id=%d\r\n"
                      (String.length body) (if accepted then 1 else 0) id)
       end
+      else if starts_with path "/actor/loadsrc" then begin
+        (* Browser sends .abcl source; compile here and run on the host VM. *)
+        (try
+           let avm = Compile.compile_source body in
+           let id = Avm.loadrun rt avm in
+           http_text (Printf.sprintf "loadsrc: src=%d avm=%d spawned actor id=%d\r\n"
+                        (String.length body) (Bytes.length avm) id)
+         with e -> http_text (Printf.sprintf "loadsrc-error: %s\r\n" (Printexc.to_string e)))
+      end
       else if starts_with path "/api/lines" then http_json (lines_json ())
+      else if starts_with path "/api/console" then http_json (console_json (int_param path "since"))
       else if starts_with path "/api/actors" then begin
         let b = Buffer.create 256 in
         Buffer.add_string b "id class enq deq\r\n";
@@ -198,8 +461,9 @@ let handle rt fd =
           (Avm.actor_table rt);
         http_text (Buffer.contents b)
       end
-      else if path = "/" || starts_with path "/?" || starts_with path "/index" then http_html page
-      else http_text "aice-avm: GET / (graphics) | POST /actor/loadvm | GET /api/actors\r\n"
+      else if starts_with path "/editor" then http_html editor_page
+      else if path = "/graphics" then http_html page
+      else serve_static path
     in
     (try ignore (Unix.write_substring fd resp 0 (String.length resp)) with _ -> ())
   end;
@@ -235,6 +499,8 @@ let () =
   Printf.printf "[aice-avm] graphics window: open  http://localhost:%d/  in your browser.\n%!" !the_port;
   Printf.printf "[aice-avm] across a network / WSL port-forward, use the machine's LAN IP instead, e.g. http://<LAN-IP>:%d/\n%!" !the_port;
   Printf.printf "[aice-avm] send actors with:  send <thishost>:%d samples/Rotate4Lines.abcl\n%!" !the_port;
+  (* Open the Xinu desktop UI in the browser right away (respects --no-open). *)
+  open_browser ();
   while true do
     let (fd, _) = Unix.accept s in
     ignore (Thread.create (fun () -> handle rt fd) ())

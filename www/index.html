@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Xinu / AIPL — aice-avm</title>
+  <link rel="stylesheet" href="/css/xinu.css" />
+</head>
+<body class="xinu-body">
+  <div id="desktop-root">
+    <div class="xinu-topbar">
+      <span class="logo">XINU</span>
+      <span style="color:#8b949e">aice-avm host VM</span>
+      <span class="spacer"></span>
+      <span class="who" id="who"></span>
+      <span class="clock" id="clock"></span>
+    </div>
+    <div class="xinu-desktop" id="desktop"></div>
+    <div class="xinu-taskbar" id="taskbar"></div>
+  </div>
+
+  <script>window.__XINU_AVM = true;</script>
+  <script src="/js/xinu.js"></script>
+</body>
+</html>
