@@ -286,6 +286,8 @@ let compile_method ~fields ~params (body : stmt) : string =
     | CallS ("wait", [ms]) -> ce ms; u8 0x07
     | CallS ("line", [x1;y1;x2;y2;col]) -> ce x1; ce y1; ce x2; ce y2; ce col; u8 0x45
     | CallS ("cls", []) -> u8 0x46
+    | CallS ("tri", [x1;y1;x2;y2;x3;y3;col]) ->
+        ce x1; ce y1; ce x2; ce y2; ce x3; ce y3; ce col; u8 0x47
     | CallS (f, _) -> failwith ("avm: unsupported call '" ^ f ^ "'")
   in
   cs body; u8 0x43;   (* RET *)

@@ -21,6 +21,8 @@ type modul = { strings : string array; classes : cls array }
 type io = {
   on_print : int -> string -> unit;                 (* actor_id, text          *)
   on_line  : int -> int -> int -> int -> int -> int -> unit; (* id,x1,y1,x2,y2,col *)
+  on_tri   : int -> int -> int -> int -> int -> int -> int -> int -> unit;
+                                          (* id,x1,y1,x2,y2,x3,y3,col — filled+shaded *)
   on_cls   : unit -> unit;
 }
 
@@ -176,6 +178,11 @@ let rec exec rt actor sender meth args =
                    let y1 = pop () in let x1 = pop () in
                    io.on_line actor.id x1 y1 x2 y2 col
          | 0x46 -> io.on_cls ()
+         | 0x47 -> let col = pop () in
+                   let y3 = pop () in let x3 = pop () in
+                   let y2 = pop () in let x2 = pop () in
+                   let y1 = pop () in let x1 = pop () in
+                   io.on_tri actor.id x1 y1 x2 y2 x3 y3 col
          | _ -> raise Exit)
       done
     with Exit -> () | _ -> ())

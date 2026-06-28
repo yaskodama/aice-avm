@@ -623,25 +623,49 @@
     const node = document.createElement('div');
     node.className = 'basic-wrap';
     node.innerHTML =
-      '<canvas class="vmg-canvas" width="300" height="234" style="background:#000;border:1px solid #2b3650;border-radius:8px;flex:1;width:100%"></canvas>' +
+      '<canvas class="vmg-canvas" width="410" height="320" style="background:#06100a;border:1px solid #2b3650;border-radius:8px;flex:1;width:100%"></canvas>' +
       '<div style="color:#8b949e;font-size:11px">live actor drawing · polls /api/lines (host VM)</div>';
     let alive = true;
-    makeWindow({ title: 'VM Graphics', x: 30, y: 300, w: 340, h: 300, node, onClose: () => { alive = false; } });
+    makeWindow({ title: 'VM Graphics', x: 30, y: 300, w: 470, h: 430, node, onClose: () => { alive = false; } });
     const canvas = node.querySelector('.vmg-canvas');
     const ctx = canvas.getContext('2d');
+    // wireframe line palette (1-based index), and the 16-colour solid palette
     const PAL = ['#7dcfff', '#f7768e', '#9ece6a', '#e0af68', '#bb9af7', '#7aa2f7', '#ffffff'];
+    const PAL16 = ['#000000', '#3060ff', '#30d040', '#30d0d0', '#e03030', '#e040e0', '#e0e040', '#f0f0f0',
+                   '#808080', '#80a0ff', '#80ff80', '#80ffff', '#ff8080', '#ff80ff', '#ffff80', '#ffffff'];
+    // an actor colour is either a direct 24-bit RGB (bit24 set) or a palette index
+    function avmColor(c) {
+      if (c & 0x1000000) return 'rgb(' + ((c >> 16) & 0xff) + ',' + ((c >> 8) & 0xff) + ',' + (c & 0xff) + ')';
+      return PAL16[c & 15];
+    }
+    let lastSig = '';
     (function frame() {
       if (!alive) return;
       fetch('/api/lines').then((r) => r.json()).then((d) => {
+        const tris = d.tris || [], lines = d.lines || [];
+        // a static mesh is large; only repaint when the scene actually changes
+        const sig = lines.length + '/' + tris.length + (tris.length ? '/' + tris[0].join(',') : '');
+        if (sig === lastSig) return;
+        lastSig = sig;
         const W = canvas.width, H = canvas.height;
         const sx = W / (d.w || 820), sy = H / (d.h || 640);
-        ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = '#06100a'; ctx.fillRect(0, 0, W, H);
+        // filled+shaded triangles first (server sends them back-to-front)
+        for (let i = 0; i < tris.length; i++) {
+          const t = tris[i];
+          ctx.fillStyle = avmColor(t[6]);
+          ctx.beginPath();
+          ctx.moveTo(t[0] * sx, t[1] * sy); ctx.lineTo(t[2] * sx, t[3] * sy); ctx.lineTo(t[4] * sx, t[5] * sy);
+          ctx.closePath(); ctx.fill();
+        }
+        // wireframe lines on top
         ctx.lineWidth = 1.5;
-        (d.lines || []).forEach((ln) => {
+        for (let i = 0; i < lines.length; i++) {
+          const ln = lines[i];
           ctx.strokeStyle = PAL[(((ln[4] || 1) - 1) % PAL.length + PAL.length) % PAL.length];
           ctx.beginPath(); ctx.moveTo(ln[0] * sx, ln[1] * sy); ctx.lineTo(ln[2] * sx, ln[3] * sy); ctx.stroke();
-        });
-      }).catch(() => {}).finally(() => { if (alive) setTimeout(frame, 100); });
+        }
+      }).catch(() => {}).finally(() => { if (alive) setTimeout(frame, 120); });
     })();
     xlog('[3d] VM Graphics window opened (polling /api/lines)', 'boot-info');
   }

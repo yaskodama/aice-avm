@@ -13,3 +13,8 @@
  (name send)
  (modules send)
  (libraries aiceavm unix threads.posix))
+
+(executable
+ (name compile_avm)
+ (modules compile_avm)
+ (libraries aiceavm))

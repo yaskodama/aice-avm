@@ -28,6 +28,7 @@ let the_port = ref 8080
 let gw = 820 and gh = 640
 let glock = Mutex.create ()
 let glines : (int*int*int*int*int) list ref = ref []
+let gtris : (int*int*int*int*int*int*int) list ref = ref []  (* x1,y1,x2,y2,x3,y3,col *)
 let gopened = ref false
 
 (* ---- shared console buffer (actor print output, read by /api/console) ---- *)
@@ -93,16 +94,24 @@ let io : Avm.io = {
   on_line = (fun _id x1 y1 x2 y2 col ->
     Mutex.lock glock; glines := (x1,y1,x2,y2,col) :: !glines; Mutex.unlock glock;
     open_browser ());
-  on_cls = (fun () -> Mutex.lock glock; glines := []; Mutex.unlock glock; open_browser ());
+  on_tri = (fun _id x1 y1 x2 y2 x3 y3 col ->
+    Mutex.lock glock; gtris := (x1,y1,x2,y2,x3,y3,col) :: !gtris; Mutex.unlock glock;
+    open_browser ());
+  on_cls = (fun () -> Mutex.lock glock; glines := []; gtris := []; Mutex.unlock glock; open_browser ());
 }
 
 let lines_json () =
-  Mutex.lock glock; let ls = !glines in Mutex.unlock glock;
+  Mutex.lock glock; let ls = !glines and ts = List.rev !gtris in Mutex.unlock glock;
   let b = Buffer.create 256 in
   Buffer.add_string b (Printf.sprintf "{\"w\":%d,\"h\":%d,\"lines\":[" gw gh);
   List.iteri (fun i (x1,y1,x2,y2,c) ->
     if i > 0 then Buffer.add_char b ',';
     Buffer.add_string b (Printf.sprintf "[%d,%d,%d,%d,%d]" x1 y1 x2 y2 c)) ls;
+  Buffer.add_string b "],\"tris\":[";
+  (* back-to-front (emission order): gtris is prepended, so reverse for painter's *)
+  List.iteri (fun i (x1,y1,x2,y2,x3,y3,c) ->
+    if i > 0 then Buffer.add_char b ',';
+    Buffer.add_string b (Printf.sprintf "[%d,%d,%d,%d,%d,%d,%d]" x1 y1 x2 y2 x3 y3 c)) ts;
   Buffer.add_string b "]}";
   Buffer.contents b
 
@@ -355,6 +364,11 @@ let http resp_ctype body =
     resp_ctype (String.length body) cors body
 let http_preflight =
   Printf.sprintf "HTTP/1.0 204 No Content\r\n%sContent-Length: 0\r\nConnection: close\r\n\r\n" cors
+(* Static assets (HTML/JS/CSS) must never be cached, or browsers keep an old
+   xinu.js after an update and the VM graphics window renders stale code. *)
+let http_static resp_ctype body =
+  Printf.sprintf "HTTP/1.0 200 OK\r\nContent-Type: %s\r\nContent-Length: %d\r\nCache-Control: no-cache, no-store, must-revalidate\r\nPragma: no-cache\r\n%sConnection: close\r\n\r\n%s"
+    resp_ctype (String.length body) cors body
 let http_text = http "text/plain"
 let http_json = http "application/json"
 let http_html = http "text/html; charset=utf-8"
@@ -382,7 +396,7 @@ let serve_static path =
   let p = if p = "/" then "/index.html" else p in
   if find_sub p ".." >= 0 then http_text "bad path"
   else match read_file_opt ("www" ^ p) with
-    | Some body -> http (ctype_of p) body
+    | Some body -> http_static (ctype_of p) body
     | None -> Printf.sprintf "HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 
 (* Parse an integer query param, e.g. ?since=12 -> 12 (default 0). *)
