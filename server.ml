@@ -398,6 +398,71 @@ let int_param path name =
     (try int_of_string (Buffer.contents b) with _ -> 0)
   end
 
+(* String query param, e.g. ?host=192.168.3.101 -> "192.168.3.101". *)
+let str_param path name =
+  let key = name ^ "=" in
+  let i = find_sub path key in
+  if i < 0 then ""
+  else begin
+    let j = ref (i + String.length key) in
+    let n = String.length path in
+    let b = Buffer.create 16 in
+    while !j < n && path.[!j] <> '&' && path.[!j] <> ' ' do
+      Buffer.add_char b path.[!j]; incr j done;
+    Buffer.contents b
+  end
+
+(* Outbound HTTP/1.0 GET to a board on the LAN; returns the response body (the
+   browser can't reach the boards' non-CORS bench routes directly, so the
+   desktop hits us same-origin and we proxy).  A read timeout guards a slow
+   board so one benchmark can't wedge the receiver. *)
+let http_get_lan host port path =
+  try
+    let he = Unix.gethostbyname host in
+    let addr = Unix.ADDR_INET (he.Unix.h_addr_list.(0), port) in
+    let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+    (try Unix.setsockopt_float fd Unix.SO_RCVTIMEO 25.0 with _ -> ());
+    (try Unix.setsockopt_float fd Unix.SO_SNDTIMEO 10.0 with _ -> ());
+    Unix.connect fd addr;
+    let req = Printf.sprintf "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n" path host in
+    ignore (Unix.write_substring fd req 0 (String.length req));
+    let buf = Buffer.create 4096 in
+    let chunk = Bytes.create 4096 in
+    (try
+       let rec loop () =
+         let k = Unix.read fd chunk 0 (Bytes.length chunk) in
+         if k > 0 then (Buffer.add_subbytes buf chunk 0 k; loop ()) in
+       loop ()
+     with _ -> ());
+    (try Unix.close fd with _ -> ());
+    let s = Buffer.contents buf in
+    let i = find_sub s "\r\n\r\n" in
+    if i >= 0 then String.sub s (i + 4) (String.length s - i - 4) else s
+  with e -> Printf.sprintf "proxy-error: %s" (Printexc.to_string e)
+
+(* /mesh/bench?host=H[&port=P]&kind=primes[&n=N] — run a benchmark on one mesh
+   board and return its raw text result (proxied; bypasses CORS). *)
+let mesh_bench path =
+  let host = str_param path "host" in
+  let port = let p = int_param path "port" in if p = 0 then 80 else p in
+  let n = let v = int_param path "n" in if v = 0 then 300000 else v in
+  let kind = str_param path "kind" in
+  if host = "" then "bench-error: missing host"
+  else match kind with
+    | "primes" | "" -> http_get_lan host port (Printf.sprintf "/smp-bench?n=%d" n)
+    | other -> Printf.sprintf "bench-error: kind '%s' has no board route yet" other
+
+(* /mesh/cmd?host=H[&port=P]&via=run|shell&c=wifi%20status — proxy a shell
+   command to a board's /run (rpi5) or /shell (rpi3/rpi4) route and return its
+   raw text.  Lets the desktop read mesh status / AODV results despite CORS. *)
+let mesh_cmd path =
+  let host = str_param path "host" in
+  let port = let p = int_param path "port" in if p = 0 then 80 else p in
+  let via  = let v = str_param path "via" in if v = "" then "run" else v in
+  let c    = str_param path "c" in
+  if host = "" || c = "" then "cmd-error: missing host/c"
+  else http_get_lan host port (Printf.sprintf "/%s?cmd=%s" via c)
+
 let ask_console nbytes =
   Printf.printf "[server] incoming actor binary: %d bytes — accept and run? [y/N] %!" nbytes;
   (try match String.trim (String.lowercase_ascii (input_line stdin)) with
@@ -461,6 +526,8 @@ let handle rt fd =
           (Avm.actor_table rt);
         http_text (Buffer.contents b)
       end
+      else if starts_with path "/mesh/bench" then http_text (mesh_bench path)
+      else if starts_with path "/mesh/cmd" then http_text (mesh_cmd path)
       else if starts_with path "/editor" then http_html editor_page
       else if path = "/graphics" then http_html page
       else serve_static path

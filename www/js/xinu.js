@@ -126,6 +126,495 @@
     openDisplay();
     openBasic();
     openLoader();
+    // Real Raspberry Pi Xinu boards mirrored as windows (HDMI over HTTP /fb).
+    openPiScreen({ title: 'rpi5 Screen (HDMI)', host: '192.168.3.101', x: 720, y: 300 });
+    openPiScreen({ title: 'rpi4 Screen (HDMI)', host: '192.168.3.100', x: 360, y: 300 });
+    openPiScreen({ title: 'rpi3 Screen (HDMI)', host: '192.168.3.50:8080',  x: 30,  y: 330, res: 96, ival: 10000 });
+    openMeshControl();
+  }
+
+  // ---- Raspberry Pi remote screen mirror ------------------------------
+  // Shows a real Raspberry Pi Xinu's HDMI framebuffer (which may have no
+  // monitor attached) as one window of this simulator. Each Pi kernel exposes
+  // a /fb route: "GET /fb?w=N" returns "DW DH SRCW SRCH" dimensions;
+  // "GET /fb?off=N&w=N" returns a chunk of the down-scaled RGB565 (LE) frame.
+  function openPiScreen(cfg) {
+    // Per-board defaults: rpi3 talks over WiFi via the one-connection-at-a-time
+    // webactor (port 8080), so it defaults to a small res + slow interval.
+    const defRes = cfg.res || 160;
+    const defIval = (cfg.ival != null) ? cfg.ival : 5000;
+    const opt = (v, label) => '<option value="' + v + '"' +
+      (v == defRes || v == defIval ? ' selected' : '') + '>' + label + '</option>';
+    const node = document.createElement('div');
+    node.className = 'basic-wrap';
+    node.innerHTML =
+      '<div class="basic-toolbar">' +
+      '<span style="color:#8b949e">host</span>' +
+      '<input class="r4-host" value="' + (cfg.host || '192.168.3.100') + '" ' +
+      'style="width:108px;background:#182236;color:#d8dee9;border:1px solid #2b3650;border-radius:6px;padding:3px 6px;font-family:inherit;font-size:11.5px">' +
+      '<span style="color:#8b949e">res</span>' +
+      '<select class="r4-res">' +
+      opt(96, '96') + opt(160, '160') + opt(240, '240') +
+      opt(320, '320') + opt(400, '400') + opt(480, '480') +
+      '</select>' +
+      '<span style="color:#8b949e">every</span>' +
+      '<select class="r4-ival">' +
+      opt(0, 'once') + opt(2000, '2s') + opt(5000, '5s') + opt(10000, '10s') +
+      '</select>' +
+      '<button data-act="refresh">⟳ Refresh</button>' +
+      '<button data-act="auto">▶ Auto</button>' +
+      '</div>' +
+      '<canvas class="r4-canvas" width="320" height="240" ' +
+      'style="background:#000;border:1px solid #2b3650;border-radius:8px;flex:1;width:100%;image-rendering:pixelated"></canvas>' +
+      '<div class="r4-stat" style="color:#8b949e;font-size:11px">idle · real Pi HDMI over HTTP</div>';
+
+    let alive = true, timer = null, busy = false;
+    makeWindow({ title: cfg.title || 'Pi Screen (HDMI)', x: cfg.x || 360, y: cfg.y || 300, w: 380, h: 340, node,
+      onClose: () => { alive = false; if (timer) clearInterval(timer); } });
+
+    const canvas = node.querySelector('.r4-canvas');
+    const ctx = canvas.getContext('2d');
+    const hostI = node.querySelector('.r4-host');
+    const resS = node.querySelector('.r4-res');
+    const ivalS = node.querySelector('.r4-ival');
+    const stat = node.querySelector('.r4-stat');
+    const autoBtn = node.querySelector('[data-act=auto]');
+
+    // The current Pi 4 kernel appends a literal "404 not found\n" (14 bytes) to
+    // every /fb response; strip it so the pixel stream stays aligned.
+    const SUF = [52, 48, 52, 32, 110, 111, 116, 32, 102, 111, 117, 110, 100, 10];
+    function strip404(a) {
+      if (a.length >= SUF.length) {
+        let m = true;
+        for (let k = 0; k < SUF.length; k++) if (a[a.length - SUF.length + k] !== SUF[k]) { m = false; break; }
+        if (m) return a.subarray(0, a.length - SUF.length);
+      }
+      return a;
+    }
+
+    async function grab() {
+      if (busy || !alive) return; busy = true;
+      const host = hostI.value.trim();
+      const w = parseInt(resS.value, 10);
+      const base = 'http://' + host + '/fb';
+      try {
+        stat.textContent = 'fetching dims…';
+        const info = (await (await fetch(base + '?w=' + w, { cache: 'no-store' })).text()).trim().split(/\s+/);
+        const dw = +info[0], dh = +info[1];
+        const total = dw * dh * 2;
+        const buf = new Uint8Array(total);
+        let off = 0, chunks = 0;
+        const t0 = performance.now();
+        while (off < total && alive) {
+          const r = await fetch(base + '?off=' + off + '&w=' + w, { cache: 'no-store' });
+          const ab = strip404(new Uint8Array(await r.arrayBuffer()));
+          const take = Math.min(ab.length, total - off);
+          buf.set(ab.subarray(0, take), off);
+          off += take; chunks++;
+          if (ab.length === 0) break;
+          stat.textContent = 'loading ' + Math.round(100 * off / total) + '%  (' + chunks + ' chunks)';
+        }
+        // RGB565 (little-endian) -> RGBA
+        const img = ctx.createImageData(dw, dh);
+        for (let i = 0; i < dw * dh; i++) {
+          const v = buf[2 * i] | (buf[2 * i + 1] << 8);
+          const o = i * 4;
+          img.data[o] = ((v >> 11) & 0x1f) << 3;
+          img.data[o + 1] = ((v >> 5) & 0x3f) << 2;
+          img.data[o + 2] = (v & 0x1f) << 3;
+          img.data[o + 3] = 255;
+        }
+        const tmp = document.createElement('canvas'); tmp.width = dw; tmp.height = dh;
+        tmp.getContext('2d').putImageData(img, 0, 0);
+        ctx.imageSmoothingEnabled = false;
+        ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(tmp, 0, 0, canvas.width, canvas.height);
+        const ms = Math.round(performance.now() - t0);
+        stat.textContent = 'OK ' + dw + '×' + dh + ', ' + chunks + ' chunks, ' + ms + ' ms';
+      } catch (_e) {
+        stat.textContent = '⚠ error (is rpi4 reachable at ' + host + '?)';
+      } finally { busy = false; }
+    }
+
+    function stopAuto() { if (timer) { clearInterval(timer); timer = null; } autoBtn.textContent = '▶ Auto'; }
+    function startAuto() {
+      const ms = parseInt(ivalS.value, 10);
+      if (!ms) { grab(); return; }        // "once" → single shot
+      stopAuto();
+      autoBtn.textContent = '⏸ Stop';
+      grab();
+      timer = setInterval(grab, ms);
+    }
+
+    node.querySelector('.basic-toolbar').addEventListener('click', (e) => {
+      const act = e.target.getAttribute('data-act');
+      if (act === 'refresh') grab();
+      else if (act === 'auto') { if (timer) stopAuto(); else startAuto(); }
+    });
+    // Re-arm with the new interval if the dropdown changes mid-run.
+    ivalS.addEventListener('change', () => { if (timer) startAuto(); });
+
+    xlog('[net] ' + (cfg.title || 'Pi Screen') + ' window opened (mirrors HDMI via /fb)', 'boot-info');
+    grab();
+  }
+
+  // ---- Mesh Control Center --------------------------------------------
+  // Discovers real Xinu boards on the LAN, joins them into a WiFi ad-hoc
+  // (IBSS) MANET (10.0.0.N) with AODV multi-hop routing, and manages them.
+  // Control/discovery stay on the wired LAN (each board's /fb is CORS-enabled,
+  // so reachability probes work cross-origin); the mesh itself runs on the
+  // boards' otherwise-idle WiFi radios.  "Join" hits each board's /wifi-adhoc
+  // route (fire-and-forget, so it works even before the route is CORS-enabled).
+  // join = non-blocking /wifi-adhoc (all 3 boards). leave = fast `wifi off`
+  // over each board's shell-HTTP (rpi5 uses /run, rpi3/rpi4 use /shell).
+  // via = how to read the board's own "wifi status" through the server proxy
+  // (/mesh/cmd). rpi4 has no status subcommand → via:null → detected by asking
+  // a peer to AODV it.
+  const MESH_BOARDS = [
+    { name: 'rpi3', host: '192.168.3.50:8080', node: 1, via: 'shell', leave: '/shell?cmd=wifi+off' },
+    { name: 'rpi4', host: '192.168.3.100',     node: 2, via: null,    leave: '/shell?cmd=wifi+off' },
+    { name: 'rpi5', host: '192.168.3.101',     node: 3, via: 'run',   leave: '/run?cmd=wifi%20off' },
+  ];
+
+  function openMeshControl() {
+    const node = document.createElement('div');
+    node.className = 'basic-wrap';
+    node.innerHTML =
+      '<div class="basic-toolbar">' +
+      '<span style="color:#8b949e">ssid</span>' +
+      '<input class="mc-ssid" value="MANET" style="width:70px;background:#182236;color:#d8dee9;border:1px solid #2b3650;border-radius:6px;padding:3px 6px;font-family:inherit;font-size:11.5px">' +
+      '<span style="color:#8b949e">ch</span>' +
+      '<input class="mc-ch" value="6" style="width:34px;background:#182236;color:#d8dee9;border:1px solid #2b3650;border-radius:6px;padding:3px 6px;font-family:inherit;font-size:11.5px">' +
+      '<button data-act="scan">🔍 Scan</button>' +
+      '<button data-act="verify">✓ Verify</button>' +
+      '<button data-act="verifybuild">⚙ Verify &amp; Build</button>' +
+      '<button data-act="form">🕸 Form</button>' +
+      '<button data-act="leaveall">⏏ Leave All</button>' +
+      '<button data-act="rebuild">♻ Rebuild</button>' +
+      '<button data-act="refresh">⟳ Refresh Status</button>' +
+      '</div>' +
+      '<div class="basic-toolbar">' +
+      '<span style="color:#8b949e">bench:</span>' +
+      '<button data-bench="primes">∑ Primes</button>' +
+      '<button data-bench="nqueens">♛ N-Queens</button>' +
+      '<button data-bench="dining">🍝 Philosophers</button>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;flex:1;min-height:0">' +
+      '<table class="proc-table mc-tbl" style="flex:1"><thead><tr>' +
+      '<th>BOARD</th><th>HOST</th><th>LINK</th><th>VERIFY</th><th>MESH IP</th><th>MESH</th>' +
+      '</tr></thead><tbody></tbody></table>' +
+      '<canvas class="mc-topo" width="220" height="200" style="background:#05080e;border:1px solid #2b3650;border-radius:8px;width:230px"></canvas>' +
+      '</div>' +
+      '<div class="basic-output mc-log" style="max-height:96px;color:#7dcfff;font-size:11px"></div>';
+
+    makeWindow({ title: 'Mesh Control Center', x: 200, y: 80, w: 660, h: 440, node });
+    const tbody = node.querySelector('tbody');
+    const logEl = node.querySelector('.mc-log');
+    const ssidI = node.querySelector('.mc-ssid');
+    const chI = node.querySelector('.mc-ch');
+    const topo = node.querySelector('.mc-topo');
+    const tctx = topo.getContext('2d');
+    // board state: { ...cfg, up, joined, verify:'?'|'ok'|'fail', dims:'WxH' }
+    const boards = MESH_BOARDS.map((b) => ({ ...b, up: false, joined: false, verify: '?', dims: '' }));
+
+    function log(msg) {
+      const d = document.createElement('div');
+      d.textContent = msg;
+      logEl.appendChild(d); logEl.scrollTop = logEl.scrollHeight;
+      xlog('[mesh] ' + msg, 'boot-info');
+    }
+
+    // CORS-readable reachability probe via each board's /fb dims route.
+    async function probe(b) {
+      try {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), 4000);
+        const r = await fetch('http://' + b.host + '/fb?w=16', { cache: 'no-store', signal: ctl.signal });
+        clearTimeout(t);
+        b.up = r.ok;
+        if (r.ok) {
+          const f = (await r.text()).trim().split(/\s+/);
+          if (f.length >= 4) b.dims = f[2] + 'x' + f[3];   // SRCW x SRCH
+        }
+      } catch (_e) { b.up = false; }
+      return b.up;
+    }
+
+    // Run a shell command on a board through the server-side proxy (/mesh/cmd),
+    // which bypasses the board's lack of CORS on /run and /shell.
+    function hostPort(h) { const p = h.split(':'); return { h: p[0], port: p[1] || '80' }; }
+    async function proxyCmd(host, via, cmd) {
+      const hp = hostPort(host);
+      const u = '/mesh/cmd?host=' + hp.h + '&port=' + hp.port + '&via=' + via +
+                '&c=' + encodeURIComponent(cmd);
+      try {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), 15000);
+        const r = await fetch(u, { cache: 'no-store', signal: ctl.signal });
+        clearTimeout(t);
+        return r.ok ? await r.text() : '';
+      } catch (_e) { return ''; }
+    }
+
+    // Detect REAL mesh membership (not just "Join clicked this session"):
+    //  - rpi3/rpi5 report it via `wifi status` (ip 10.0.0.N + connected/MANET)
+    //  - rpi4 has no status → ask an up, status-capable peer to AODV 10.0.0.2;
+    //    "route already known/found" means rpi4 is a live neighbour on the cell.
+    async function detectJoined(b) {
+      if (b.via) {
+        const t = await proxyCmd(b.host, b.via, 'wifi status');
+        return t.indexOf('10.0.0.' + b.node) >= 0 && /connected|MANET/i.test(t);
+      }
+      const peer = boards.find((x) => x.via && x.up && x !== b);
+      if (!peer) return false;
+      const t = await proxyCmd(peer.host, peer.via, 'wifi aodv 10.0.0.' + b.node);
+      return /route already known|route found|\bhop\b/i.test(t) && !/no route|unreachable/i.test(t);
+    }
+
+    // Common verification "script" run against every board, the same way:
+    //  1) LAN reachable?  2) /fb screen-mirror responds with real dims?
+    //  3) ready to mesh (has the /wifi-adhoc control plane).
+    // Uses /fb (CORS) — the one route every patched Xinu exposes cross-origin.
+    async function verify() {
+      log('=== VERIFY: running common check on ' + boards.length + ' boards ===');
+      let pass = 0;
+      for (const b of boards) {
+        b.verify = '?'; render();
+        const ok = await probe(b);
+        b.verify = ok ? 'ok' : 'fail';
+        if (ok) { pass++; log('  ✓ ' + b.name + ' (' + b.host + ') fb=' + b.dims + ' — ready'); }
+        else    { log('  ✗ ' + b.name + ' (' + b.host + ') — unreachable'); }
+        render();
+      }
+      log('VERIFY: ' + pass + '/' + boards.length + ' boards ready' +
+          (pass === boards.length ? ' — all green ✓' : ''));
+      return pass === boards.length;
+    }
+
+    // One-click: verify, and if every board passes, auto-build the mesh.
+    async function verifyAndBuild() {
+      const allOk = await verify();
+      if (!allOk) { log('Verify & Build: aborting — not all boards passed.'); return; }
+      log('=== AUTO-BUILD: all verified, forming the mesh ===');
+      boards.forEach((b, k) => { if (b.up) setTimeout(() => joinOne(b), k * 1500); });
+      // After the radios settle, draw the resulting topology.
+      setTimeout(drawMesh, boards.length * 1500 + 2000);
+    }
+
+    // Visualize the mesh: joined+up nodes around a ring, fully connected
+    // (an IBSS cell makes every member a 1-hop neighbour of every other).
+    function drawMesh() {
+      const W = topo.width, H = topo.height, cx = W / 2, cy = H / 2 + 6, R = 64;
+      tctx.fillStyle = '#05080e'; tctx.fillRect(0, 0, W, H);
+      tctx.fillStyle = '#8b949e'; tctx.font = '11px monospace';
+      tctx.fillText('MESH ' + (ssidI.value || 'MANET'), 8, 14);
+      const mem = boards.filter((b) => b.up && b.joined);
+      if (mem.length === 0) {
+        tctx.fillStyle = '#566'; tctx.fillText('(no mesh yet)', cx - 34, cy);
+        return;
+      }
+      const pos = mem.map((b, i) => {
+        const a = -Math.PI / 2 + i * 2 * Math.PI / mem.length;
+        return { b, x: cx + R * Math.cos(a), y: cy + R * Math.sin(a) };
+      });
+      // edges: full mesh
+      tctx.strokeStyle = '#2e6f5e'; tctx.lineWidth = 1.5;
+      for (let i = 0; i < pos.length; i++)
+        for (let j = i + 1; j < pos.length; j++) {
+          tctx.beginPath(); tctx.moveTo(pos[i].x, pos[i].y);
+          tctx.lineTo(pos[j].x, pos[j].y); tctx.stroke();
+        }
+      // nodes
+      pos.forEach((p) => {
+        tctx.beginPath(); tctx.arc(p.x, p.y, 16, 0, 7);
+        tctx.fillStyle = '#143'; tctx.fill();
+        tctx.strokeStyle = '#9ece6a'; tctx.lineWidth = 2; tctx.stroke();
+        tctx.fillStyle = '#e6edf3'; tctx.font = 'bold 10px monospace';
+        tctx.textAlign = 'center'; tctx.fillText(p.b.name, p.x, p.y - 1);
+        tctx.fillStyle = '#7dcfff'; tctx.font = '9px monospace';
+        tctx.fillText('.0.0.' + p.b.node, p.x, p.y + 9);
+        tctx.textAlign = 'left';
+      });
+      tctx.fillStyle = '#8b949e'; tctx.font = '9px monospace';
+      tctx.fillText(mem.length + ' nodes · full mesh (1-hop)', 8, H - 6);
+    }
+
+    async function joinOne(b) {
+      const ssid = ssidI.value.trim() || 'MANET';
+      const ch = parseInt(chI.value, 10) || 6;
+      const url = 'http://' + b.host + '/wifi-adhoc?ssid=' + encodeURIComponent(ssid) +
+                  '&ch=' + ch + '&n=' + b.node;
+      log('joining ' + b.name + ' -> 10.0.0.' + b.node + ' (ssid=' + ssid + ' ch=' + ch + ') ...');
+      // fire-and-forget: the board's /wifi-adhoc may freeze its gateway for ~1
+      // min during WiFi bring-up, so we don't await a readable response.
+      try { fetch(url, { mode: 'no-cors', cache: 'no-store' }); } catch (_e) {}
+      b.joined = true;
+      render();
+    }
+
+    async function leaveOne(b) {
+      log('leaving ' + b.name + ' (wifi off, radio down) ...');
+      try { fetch('http://' + b.host + b.leave, { mode: 'no-cors', cache: 'no-store' }); } catch (_e) {}
+      b.joined = false;
+      render();
+    }
+
+    // Tear the whole mesh down, then re-form it after the radios settle.
+    async function rebuild() {
+      log('=== REBUILD: leaving all, then re-forming the mesh ===');
+      boards.forEach((b) => { if (b.up) leaveOne(b); });
+      // give the radios a few seconds to drop the IBSS cell, then re-join
+      setTimeout(() => {
+        boards.forEach((b, k) => { if (b.up) setTimeout(() => joinOne(b), k * 1500); });
+      }, 4000);
+    }
+
+    function render() {
+      tbody.innerHTML = boards.map((b, i) => {
+        const link = b.up ? '<span class="state-ready">● up</span>'
+                          : '<span class="state-susp">○ down</span>';
+        const vmark = b.verify === 'ok' ? '<span class="state-ready">✓ ' + (b.dims || 'ok') + '</span>'
+                    : b.verify === 'fail' ? '<span class="state-susp">✗</span>'
+                    : '<span style="color:#566">–</span>';
+        const meship = '10.0.0.' + b.node;
+        return '<tr><td>' + b.name + '</td><td>' + b.host + '</td><td>' + link +
+          '</td><td>' + vmark +
+          '</td><td>' + (b.joined ? '<span class="actor-mark">' + meship + '</span>' : meship) +
+          '</td><td>' +
+          '<button data-join="' + i + '" style="font-size:11px">Join</button> ' +
+          '<button data-leave="' + i + '" style="font-size:11px">Leave</button>' +
+          '</td></tr>';
+      }).join('');
+      tbody.querySelectorAll('[data-join]').forEach((btn) => {
+        btn.onclick = () => joinOne(boards[+btn.getAttribute('data-join')]);
+      });
+      tbody.querySelectorAll('[data-leave]').forEach((btn) => {
+        btn.onclick = () => leaveOne(boards[+btn.getAttribute('data-leave')]);
+      });
+      drawMesh();
+    }
+
+    // Full live status: LAN reachability + REAL mesh membership, then explain
+    // the state of every board (and, if the mesh is incomplete, exactly why).
+    async function refreshStatus() {
+      log('=== STATUS @ ' + new Date().toLocaleTimeString() + ' — probing ' +
+          boards.length + ' boards (LAN /fb + mesh status) ===');
+      await Promise.all(boards.map(probe));
+      await Promise.all(boards.map(async (b) => {
+        b.joined = b.up ? await detectJoined(b) : false;
+      }));
+      render();
+      const meshed = boards.filter((b) => b.joined);
+      const reasons = [];
+      for (const b of boards) {
+        if (b.up && b.joined) {
+          log('  ✓ ' + b.name + ' up · MESH 10.0.0.' + b.node + ' · fb=' + (b.dims || '?'));
+        } else if (b.up && !b.joined) {
+          log('  ◐ ' + b.name + ' up (LAN ' + b.host + ') but NOT on mesh');
+          reasons.push(b.name + ': reachable on Ethernet but its WiFi radio is not in the IBSS cell — click Join (or Form) to bring it onto 10.0.0.' + b.node + '.');
+        } else {
+          log('  ✗ ' + b.name + ' DOWN (' + b.host + ')');
+          reasons.push(b.name + ': not reachable on LAN — powered off, wrong IP, or HTTP wedged (reboot the board).');
+        }
+      }
+      if (meshed.length >= 2) {
+        log('MESH: ' + meshed.map((b) => b.name).join(' + ') + ' connected (' +
+            meshed.length + ' nodes, full 1-hop).');
+      } else {
+        log('MESH: NOT BUILT (' + meshed.length + ' node' + (meshed.length === 1 ? '' : 's') +
+            ' on the cell — need ≥2). Reasons:');
+        reasons.forEach((r) => log('   • ' + r));
+      }
+    }
+
+    // Scan a small LAN range for additional Xinu boards (CORS /fb on port 80).
+    async function scan() {
+      log('scanning 192.168.3.2..120:80 for Xinu /fb endpoints ...');
+      const found = [];
+      const probes = [];
+      for (let i = 2; i <= 120; i++) {
+        const host = '192.168.3.' + i;
+        if (boards.some((b) => b.host.split(':')[0] === host)) continue;
+        probes.push((async () => {
+          try {
+            const ctl = new AbortController();
+            const t = setTimeout(() => ctl.abort(), 1500);
+            const r = await fetch('http://' + host + '/fb?w=16', { cache: 'no-store', signal: ctl.signal });
+            clearTimeout(t);
+            if (r.ok) found.push(host);
+          } catch (_e) {}
+        })());
+      }
+      await Promise.all(probes);
+      if (!found.length) log('scan: no additional Xinu boards found (known 3 already listed).');
+      found.forEach((host, k) => {
+        if (boards.some((b) => b.host === host)) return;
+        boards.push({ name: 'xinu?', host, node: boards.length + 1, up: true, joined: false });
+        log('scan: found Xinu at ' + host + ' -> added as node ' + boards.length);
+      });
+      render();
+    }
+
+    // Run a benchmark across every reachable board and tabulate the results.
+    // primes uses each board's real SMP benchmark (/smp-bench via the proxy);
+    // nqueens/dining need a board-side route that isn't flashed yet.
+    async function runBench(kind) {
+      const up = boards.filter((b) => b.up);
+      if (!up.length) { log('bench: no reachable boards — run Refresh Status first.'); return; }
+      if (kind === 'primes') {
+        const n = 300000;
+        log('=== BENCH primes: count primes < ' + n + ' (SMP, all cores) on ' + up.length + ' boards ===');
+        const rows = [];
+        for (const b of up) {
+          const hp = hostPort(b.host);
+          log('  running on ' + b.name + ' ...');
+          try {
+            const r = await fetch('/mesh/bench?host=' + hp.h + '&port=' + hp.port +
+                                  '&kind=primes&n=' + n, { cache: 'no-store' });
+            const t = (await r.text()).trim();
+            const one   = (t.match(/1-core\s*ms\s*=\s*([0-9]+)/i) || [])[1];
+            const all   = (t.match(/N-core\s*ms\s*=\s*([0-9]+)/i) || [])[1];
+            const cores = (t.match(/cores_online\s*=\s*([0-9]+)/i) || [])[1];
+            const spx   = (t.match(/speedup\s*x100\s*=\s*([0-9]+)/i) || [])[1];
+            const sp    = spx ? (parseInt(spx, 10) / 100).toFixed(2) : null;
+            rows.push({ name: b.name, one, all, sp, cores, raw: t });
+            log('    ' + b.name + ': ' + (cores || '?') + ' cores · 1-core=' +
+                (one || '?') + 'ms  ' + (cores || 'N') + '-core=' + (all || '?') +
+                'ms  speedup=' + (sp || '?') + 'x');
+          } catch (_e) { log('    ' + b.name + ': bench failed'); }
+        }
+        log('BENCH primes done: ' + rows.length + '/' + up.length + ' boards reported.');
+      } else {
+        log('bench "' + kind + '": not wired on the boards yet — only primes (SMP) ' +
+            'has a kernel route. nqueens/dining need a /bench?kind=' + kind + ' reflash.');
+      }
+    }
+
+    node.querySelectorAll('.basic-toolbar')[1].addEventListener('click', (e) => {
+      const k = e.target.getAttribute('data-bench');
+      if (k) runBench(k);
+    });
+
+    node.querySelector('.basic-toolbar').addEventListener('click', (e) => {
+      const act = e.target.getAttribute('data-act');
+      if (act === 'scan') scan();
+      else if (act === 'verify') verify();
+      else if (act === 'verifybuild') verifyAndBuild();
+      else if (act === 'refresh') refreshStatus();
+      else if (act === 'form') {
+        log('=== Forming mesh on all reachable boards ===');
+        boards.forEach((b, k) => { if (b.up) setTimeout(() => joinOne(b), k * 1500); });
+      }
+      else if (act === 'leaveall') {
+        log('=== Leaving mesh on all boards ===');
+        boards.forEach((b) => { if (b.up) leaveOne(b); });
+      }
+      else if (act === 'rebuild') rebuild();
+    });
+
+    render();
+    refreshStatus();
+    xlog('[mesh] Mesh Control Center opened', 'boot-ok');
   }
 
   // Live actor drawing from the host VM: polls /api/lines and renders the
@@ -234,7 +723,7 @@
       const c = (a[0] || '').toLowerCase();
       if (!c) return;
       switch (c) {
-        case 'help': println('commands: help ver ps clear date echo basic loadvm blender about'); break;
+        case 'help': println('commands: help ver ps clear date echo basic loadvm blender rpi3 rpi4 rpi5 mesh about'); break;
         case 'ver': println('Xinu (browser sim) — AIPL/AICE edition, build ' + (info.build || 'web')); break;
         case 'about': println('Embedded Xinu desktop simulator. Multi-window WM + BASIC.'); break;
         case 'ps':
@@ -249,6 +738,10 @@
         case 'loadvm': openLoader(); println('[wm] opened Actor Loader'); break;
         case 'blender': case 'display': openDisplay(); println('[wm] opened 3D Display'); break;
         case 'graphics': case 'lines': openVmGraphics(); println('[wm] opened VM Graphics'); break;
+        case 'rpi3': openPiScreen({ title: 'rpi3 Screen (HDMI)', host: '192.168.3.50:8080', x: 30, y: 330, res: 96, ival: 10000 }); println('[wm] opened rpi3 Screen'); break;
+        case 'rpi4': case 'screen': openPiScreen({ title: 'rpi4 Screen (HDMI)', host: '192.168.3.100', x: 360, y: 300 }); println('[wm] opened rpi4 Screen'); break;
+        case 'rpi5': openPiScreen({ title: 'rpi5 Screen (HDMI)', host: '192.168.3.101', x: 720, y: 300 }); println('[wm] opened rpi5 Screen'); break;
+        case 'mesh': case 'meshctl': openMeshControl(); println('[wm] opened Mesh Control Center'); break;
         default: println('xsh: unknown command: ' + c + '  (try: help)');
       }
     }
