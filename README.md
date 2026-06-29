@@ -19,6 +19,10 @@ natively on **Windows**, macOS and Linux.
                                                        runs the actors on threads
 ```
 
+![aice-avm on Windows — the Xinu desktop UI: Mesh Control Center driving a live 3-board Raspberry Pi WiFi mesh, the 3D MAKINA-7 display, the Actor Loader, and a real rpi5 HDMI framebuffer mirror](docs/screenshot-mesh-makina.jpg)
+
+*The OCaml host VM running on Windows: a windowed Xinu desktop driving a live 3-board Raspberry Pi WiFi mesh (rpi3/4/5 over IBSS + AODV), with the MAKINA-7 mesh on the 3D display and a real rpi5 HDMI framebuffer mirrored in.*
+
 ## What's in here
 
 | file | role |
