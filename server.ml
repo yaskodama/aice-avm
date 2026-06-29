@@ -529,6 +529,8 @@ let mesh_bench path =
   if host = "" then "bench-error: missing host"
   else match kind with
     | "primes" | "" -> http_get_lan host port (Printf.sprintf "/smp-bench?n=%d" n)
+    | "nqueens" | "dining" ->
+        http_get_lan host port (Printf.sprintf "/bench?kind=%s&n=%d" kind n)
     | other -> Printf.sprintf "bench-error: kind '%s' has no board route yet" other
 
 (* /mesh/cmd?host=H[&port=P]&via=run|shell&c=wifi%20status — proxy a shell

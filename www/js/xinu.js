@@ -800,9 +800,35 @@
           } catch (_e) { log('    ' + b.name + ': bench failed'); }
         }
         log('BENCH primes done: ' + rows.length + '/' + up.length + ' boards reported.');
+      } else if (kind === 'nqueens' || kind === 'dining') {
+        const n = kind === 'nqueens' ? 13 : 5;
+        const what = kind === 'nqueens'
+          ? 'N-Queens (board ' + n + ', count all solutions)'
+          : 'Dining Philosophers (' + n + ' philosophers, independent tables)';
+        log('=== BENCH ' + kind + ': ' + what + ' — SMP, all cores — on ' + up.length + ' boards ===');
+        const rows = [];
+        for (const b of up) {
+          const hp = hostPort(b.host);
+          log('  running on ' + b.name + ' ...');
+          try {
+            const r = await fetch('/mesh/bench?host=' + hp.h + '&port=' + hp.port +
+                                  '&kind=' + kind + '&n=' + n, { cache: 'no-store' });
+            const t = (await r.text()).trim();
+            const one    = (t.match(/1-core\s*ms\s*=\s*([0-9]+)/i) || [])[1];
+            const all    = (t.match(/N-core\s*ms\s*=\s*([0-9]+)/i) || [])[1];
+            const cores  = (t.match(/cores_online\s*=\s*([0-9]+)/i) || [])[1];
+            const spx    = (t.match(/speedup\s*x100\s*=\s*([0-9]+)/i) || [])[1];
+            const sp     = spx ? (parseInt(spx, 10) / 100).toFixed(2) : null;
+            const metric = (t.match(/(?:solutions|meals)\s*=\s*[0-9]+/i) || [''])[0];
+            rows.push({ name: b.name, one, all, sp, cores, raw: t });
+            log('    ' + b.name + ': ' + (cores || '?') + ' cores · ' + metric +
+                ' · 1-core=' + (one || '?') + 'ms  ' + (cores || 'N') + '-core=' +
+                (all || '?') + 'ms  speedup=' + (sp || '?') + 'x');
+          } catch (_e) { log('    ' + b.name + ': bench failed (board needs the /bench reflash?)'); }
+        }
+        log('BENCH ' + kind + ' done: ' + rows.length + '/' + up.length + ' boards reported.');
       } else {
-        log('bench "' + kind + '": not wired on the boards yet — only primes (SMP) ' +
-            'has a kernel route. nqueens/dining need a /bench?kind=' + kind + ' reflash.');
+        log('bench "' + kind + '": unknown kind.');
       }
     }
 
