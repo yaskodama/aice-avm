@@ -293,6 +293,7 @@
       '<button data-act="leaveall">⏏ Leave All</button>' +
       '<button data-act="rebuild">♻ Rebuild</button>' +
       '<button data-act="refresh">⟳ Refresh Status</button>' +
+      '<button data-act="swarm">🚁 Drone Swarm</button>' +
       '</div>' +
       '<div class="basic-toolbar">' +
       '<span style="color:#8b949e">bench:</span>' +
@@ -826,11 +827,134 @@
         boards.forEach((b) => { if (b.up) leaveOne(b); });
       }
       else if (act === 'rebuild') rebuild();
+      else if (act === 'swarm') openSwarmControl();
     });
 
     render();
     setAuto(true);   // start continuously monitoring + auto-joining on open
     xlog('[mesh] Mesh Control Center opened (auto-pilot ON)', 'boot-ok');
+  }
+
+  // ---- Drone Swarm Supervisor (P1) ------------------------------------
+  // Load-aware actor placement applied to drone control: assigns N drones to
+  // mesh Xinu boards using the live perf table (window.__MESH_PERF, published
+  // by the Mesh Control Center).  Each drone goes to the board minimising
+  // (load+1)/capacity + latency penalty, so the fleet spreads proportionally
+  // to each board's parallel compute power while balancing load and latency.
+  function openSwarmControl() {
+    const node = document.createElement('div');
+    node.className = 'basic-wrap';
+    const inp = 'background:#182236;color:#d8dee9;border:1px solid #2b3650;border-radius:6px;padding:3px 6px;font-family:inherit;font-size:11.5px';
+    node.innerHTML =
+      '<div class="basic-toolbar">' +
+      '<span style="color:#8b949e">drones</span>' +
+      '<input class="sw-n" value="12" style="width:44px;' + inp + '">' +
+      '<button data-sw="assign">⚙ Assign</button>' +
+      '<button data-sw="auto">▶ Auto</button>' +
+      '<span style="color:#8b949e" class="sw-info"></span>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;flex:1;min-height:0">' +
+      '<table class="proc-table sw-tbl" style="flex:1"><thead><tr>' +
+      '<th>XINU</th><th>CAP</th><th>LAT</th><th>DRONES</th><th>IDS</th>' +
+      '</tr></thead><tbody></tbody></table>' +
+      '<canvas class="sw-topo" width="240" height="220" style="background:#05080e;border:1px solid #2b3650;border-radius:8px;width:240px"></canvas>' +
+      '</div>' +
+      '<div class="basic-output sw-log" style="max-height:90px;color:#7dcfff;font-size:11px"></div>';
+    makeWindow({ title: 'Drone Swarm Supervisor', x: 240, y: 120, w: 690, h: 440, node,
+                 onClose: () => { if (timer) clearInterval(timer); } });
+    const tbody = node.querySelector('tbody');
+    const logEl = node.querySelector('.sw-log');
+    const info  = node.querySelector('.sw-info');
+    const nI    = node.querySelector('.sw-n');
+    const topo  = node.querySelector('.sw-topo');
+    const tctx  = topo.getContext('2d');
+    let timer = null;
+
+    function log(m) { const d = document.createElement('div'); d.textContent = m; logEl.appendChild(d); logEl.scrollTop = logEl.scrollHeight; }
+
+    // Greedy load-aware placement over the live mesh perf table.
+    function assign(nDrones) {
+      const perf = window.__MESH_PERF;
+      const boards = (perf && perf.nodes) ? perf.nodes.filter((n) => n.kind === 'board') : [];
+      if (!boards.length) {
+        info.textContent = ' — no mesh boards yet (open Mesh Control Center & form the mesh)';
+        return null;
+      }
+      const load = {}; boards.forEach((b) => { load[b.name] = 0; });
+      const map = [];
+      for (let d = 0; d < nDrones; d++) {
+        let best = null, bs = Infinity;
+        for (const b of boards) {
+          const cap = b.capacity || b.cores || 1;
+          const lat = (b.lat == null) ? 120 : b.lat;
+          const s = (load[b.name] + 1) / cap + lat / 1000;     // lower = better target
+          if (s < bs) { bs = s; best = b; }
+        }
+        load[best.name]++; map.push({ drone: d, board: best.name, node: best.node });
+      }
+      return { boards, load, map };
+    }
+
+    function render(a) {
+      if (!a) { tbody.innerHTML = ''; drawTopo(null); return; }
+      const total = a.map.length;
+      tbody.innerHTML = a.boards.map((b) => {
+        const cnt = a.load[b.name] || 0;
+        const ids = a.map.filter((m) => m.board === b.name).map((m) => 'D' + m.drone);
+        const bar = '█'.repeat(Math.round(cnt / Math.max(1, total) * 12));
+        return '<tr><td>' + b.name + '</td>' +
+          '<td>' + (b.capacity != null ? b.capacity : (b.cores ? b.cores + 'c' : '–')) + '</td>' +
+          '<td>' + (b.lat == null ? '–' : b.lat + 'ms') + '</td>' +
+          '<td><span class="actor-mark">' + cnt + '</span> <span style="color:#2e6f5e">' + bar + '</span></td>' +
+          '<td style="color:#7dcfff;font-size:10px">' + ids.join(' ') + '</td></tr>';
+      }).join('');
+      info.textContent = ' — ' + total + ' drones → ' + a.boards.length + ' boards';
+      drawTopo(a);
+    }
+
+    function drawTopo(a) {
+      const W = topo.width, H = topo.height, cx = W / 2, cy = H / 2 + 8, R = 70;
+      tctx.fillStyle = '#05080e'; tctx.fillRect(0, 0, W, H);
+      tctx.fillStyle = '#8b949e'; tctx.font = '11px monospace'; tctx.textAlign = 'left';
+      tctx.fillText('SWARM → XINU', 8, 14);
+      if (!a || !a.boards.length) { tctx.fillStyle = '#566'; tctx.fillText('(no assignment)', cx - 40, cy); return; }
+      const n = a.boards.length, total = a.map.length;
+      a.boards.forEach((b, i) => {
+        const ang = -Math.PI / 2 + i * 2 * Math.PI / n;
+        const x = cx + R * Math.cos(ang), y = cy + R * Math.sin(ang);
+        const cnt = a.load[b.name] || 0;
+        const rad = 11 + Math.round(cnt / Math.max(1, total) * 22);
+        tctx.beginPath(); tctx.arc(x, y, rad, 0, 7);
+        tctx.fillStyle = '#11304a'; tctx.fill();
+        tctx.strokeStyle = '#7aa2f7'; tctx.lineWidth = 2; tctx.stroke();
+        tctx.fillStyle = '#e6edf3'; tctx.font = 'bold 10px monospace'; tctx.textAlign = 'center';
+        tctx.fillText(b.name, x, y - 1);
+        tctx.fillStyle = '#9ece6a'; tctx.font = '9px monospace';
+        tctx.fillText(cnt + ' ▸', x, y + 10);
+      });
+      tctx.textAlign = 'left'; tctx.fillStyle = '#8b949e'; tctx.font = '9px monospace';
+      tctx.fillText(total + ' drones placed (size ∝ load)', 8, H - 6);
+    }
+
+    function doAssign() {
+      const n = parseInt(nI.value, 10) || 0;
+      const a = assign(n);
+      if (a) log('placed ' + n + ' drones: ' + a.boards.map((b) => b.name + '=' + (a.load[b.name] || 0)).join('  '));
+      render(a);
+    }
+
+    node.querySelector('.basic-toolbar').addEventListener('click', (e) => {
+      const k = e.target.getAttribute('data-sw');
+      if (k === 'assign') doAssign();
+      else if (k === 'auto') {
+        const btn = e.target;
+        if (timer) { clearInterval(timer); timer = null; btn.textContent = '▶ Auto'; btn.style.color = ''; log('auto-reassign OFF'); }
+        else { btn.textContent = '⏸ Auto ON'; btn.style.color = '#9ece6a'; log('auto-reassign ON (tracks the live perf table)'); doAssign(); timer = setInterval(doAssign, 5000); }
+      }
+    });
+
+    doAssign();
+    xlog('[swarm] Drone Swarm Supervisor opened', 'boot-ok');
   }
 
   // Live actor drawing from the host VM: polls /api/lines and renders the
