@@ -324,7 +324,7 @@
     // plus the Windows sim) so they always appear in the table and topology.
     const SIM_COORDS = [
       { name: 'mac-sim', host: (location.host || 'localhost:8080'), node: 0, kind: 'sim' },
-      { name: 'win-sim', host: '192.168.3.32:8080',                  node: 0, kind: 'sim' },
+      { name: 'win-sim', host: '192.168.3.218:8080',                 node: 0, kind: 'sim' },
     ];
     // board state: { ...cfg, up, joined, verify, dims, lat(ms), cores, sp, cap }
     const boards = MESH_BOARDS.concat(SIM_COORDS).map((b) => ({
