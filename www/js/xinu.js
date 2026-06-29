@@ -271,9 +271,9 @@
   // (/mesh/cmd). rpi4 has no status subcommand → via:null → detected by asking
   // a peer to AODV it.
   const MESH_BOARDS = [
-    { name: 'rpi3', host: '192.168.3.50:8080', node: 1, via: 'shell', leave: '/shell?cmd=wifi+off' },
-    { name: 'rpi4', host: '192.168.3.100',     node: 2, via: null,    leave: '/shell?cmd=wifi+off' },
-    { name: 'rpi5', host: '192.168.3.101',     node: 3, via: 'run',   leave: '/run?cmd=wifi%20off' },
+    { name: 'rpi3', host: '192.168.3.50:8080', node: 1, via: 'shell', leave: '/shell?cmd=wifi+off', kind: 'board' },
+    { name: 'rpi4', host: '192.168.3.100',     node: 2, via: null,    leave: '/shell?cmd=wifi+off', kind: 'board' },
+    { name: 'rpi5', host: '192.168.3.101',     node: 3, via: 'run',   leave: '/run?cmd=wifi%20off', kind: 'board' },
   ];
 
   function openMeshControl() {
@@ -285,6 +285,7 @@
       '<input class="mc-ssid" value="MANET" style="width:70px;background:#182236;color:#d8dee9;border:1px solid #2b3650;border-radius:6px;padding:3px 6px;font-family:inherit;font-size:11.5px">' +
       '<span style="color:#8b949e">ch</span>' +
       '<input class="mc-ch" value="6" style="width:34px;background:#182236;color:#d8dee9;border:1px solid #2b3650;border-radius:6px;padding:3px 6px;font-family:inherit;font-size:11.5px">' +
+      '<button data-act="auto">▶ Auto</button>' +
       '<button data-act="scan">🔍 Scan</button>' +
       '<button data-act="verify">✓ Verify</button>' +
       '<button data-act="verifybuild">⚙ Verify &amp; Build</button>' +
@@ -298,24 +299,40 @@
       '<button data-bench="primes">∑ Primes</button>' +
       '<button data-bench="nqueens">♛ N-Queens</button>' +
       '<button data-bench="dining">🍝 Philosophers</button>' +
+      '<span style="color:#8b949e">　display:</span>' +
+      '<button data-bench="makina">🎭 MAKINA-7→rpi5</button>' +
       '</div>' +
       '<div style="display:flex;gap:8px;flex:1;min-height:0">' +
       '<table class="proc-table mc-tbl" style="flex:1"><thead><tr>' +
-      '<th>BOARD</th><th>HOST</th><th>LINK</th><th>VERIFY</th><th>MESH IP</th><th>MESH</th>' +
+      '<th>NODE</th><th>HOST</th><th>LINK</th><th>LAT</th><th>CAP</th><th>MESH</th>' +
       '</tr></thead><tbody></tbody></table>' +
       '<canvas class="mc-topo" width="220" height="200" style="background:#05080e;border:1px solid #2b3650;border-radius:8px;width:230px"></canvas>' +
       '</div>' +
       '<div class="basic-output mc-log" style="max-height:96px;color:#7dcfff;font-size:11px"></div>';
 
-    makeWindow({ title: 'Mesh Control Center', x: 200, y: 80, w: 660, h: 440, node });
+    makeWindow({ title: 'Mesh Control Center', x: 200, y: 80, w: 660, h: 440, node,
+                 onClose: () => { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } } });
     const tbody = node.querySelector('tbody');
     const logEl = node.querySelector('.mc-log');
     const ssidI = node.querySelector('.mc-ssid');
     const chI = node.querySelector('.mc-ch');
     const topo = node.querySelector('.mc-topo');
     const tctx = topo.getContext('2d');
-    // board state: { ...cfg, up, joined, verify:'?'|'ok'|'fail', dims:'WxH' }
-    const boards = MESH_BOARDS.map((b) => ({ ...b, up: false, joined: false, verify: '?', dims: '' }));
+    // Xinu simulators (OCaml aice-avm VMs) act as monitoring CENTERS / LAN
+    // coordinators, not IBSS members.  Seed the known ones (this Mac VM = self,
+    // plus the Windows sim) so they always appear in the table and topology.
+    const SIM_COORDS = [
+      { name: 'mac-sim', host: (location.host || 'localhost:8080'), node: 0, kind: 'sim' },
+      { name: 'win-sim', host: '192.168.3.32:8080',                  node: 0, kind: 'sim' },
+    ];
+    // board state: { ...cfg, up, joined, verify, dims, lat(ms), cores, sp, cap }
+    const boards = MESH_BOARDS.concat(SIM_COORDS).map((b) => ({
+      ...b, up: false, joined: false, verify: '?', dims: '',
+      lat: null, cores: null, sp: null, cap: null, lastJoinAt: 0, seen: 0,
+    }));
+    // Auto-pilot (continuous monitor) state.
+    let autoOn = false, autoTimer = null, tickN = 0, busy = false;
+    const TICK_MS = 5000, SWEEP_EVERY = 4, SMP_EVERY = 12;
 
     function log(msg) {
       const d = document.createElement('div');
@@ -324,17 +341,26 @@
       xlog('[mesh] ' + msg, 'boot-info');
     }
 
-    // CORS-readable reachability probe via each board's /fb dims route.
+    // CORS-readable reachability probe.  Boards answer /fb (HDMI mirror dims);
+    // sims (OCaml aice-avm VMs) answer /api/console.  Also times the round-trip
+    // into a rolling latency (ms) used by the load-distribution perf table.
     async function probe(b) {
+      const path = b.kind === 'sim' ? '/api/console' : '/fb?w=16';
+      const t0 = (performance && performance.now) ? performance.now() : Date.now();
       try {
         const ctl = new AbortController();
         const t = setTimeout(() => ctl.abort(), 4000);
-        const r = await fetch('http://' + b.host + '/fb?w=16', { cache: 'no-store', signal: ctl.signal });
+        const r = await fetch('http://' + b.host + path, { cache: 'no-store', signal: ctl.signal });
         clearTimeout(t);
         b.up = r.ok;
         if (r.ok) {
-          const f = (await r.text()).trim().split(/\s+/);
-          if (f.length >= 4) b.dims = f[2] + 'x' + f[3];   // SRCW x SRCH
+          const dt = ((performance && performance.now) ? performance.now() : Date.now()) - t0;
+          b.lat = (b.lat == null) ? dt : b.lat * 0.6 + dt * 0.4;   // EWMA
+          b.seen = Date.now();
+          if (b.kind !== 'sim') {
+            const f = (await r.text()).trim().split(/\s+/);
+            if (f.length >= 4) b.dims = f[2] + 'x' + f[3];          // SRCW x SRCH
+          }
         }
       } catch (_e) { b.up = false; }
       return b.up;
@@ -404,42 +430,74 @@
     // Visualize the mesh: joined+up nodes around a ring, fully connected
     // (an IBSS cell makes every member a 1-hop neighbour of every other).
     function drawMesh() {
-      const W = topo.width, H = topo.height, cx = W / 2, cy = H / 2 + 6, R = 64;
+      const W = topo.width, H = topo.height, cx = W / 2, cy = H / 2 + 24, R = 50;
       tctx.fillStyle = '#05080e'; tctx.fillRect(0, 0, W, H);
+      tctx.textAlign = 'left';
       tctx.fillStyle = '#8b949e'; tctx.font = '11px monospace';
-      tctx.fillText('MESH ' + (ssidI.value || 'MANET'), 8, 14);
-      const mem = boards.filter((b) => b.up && b.joined);
-      if (mem.length === 0) {
-        tctx.fillStyle = '#566'; tctx.fillText('(no mesh yet)', cx - 34, cy);
-        return;
-      }
+      tctx.fillText('MESH ' + (ssidI.value || 'MANET'), 8, 13);
+
+      // --- monitoring centers (Xinu simulators) across the top -------------
+      const sims = boards.filter((b) => b.kind === 'sim' && b.up);
+      const simPos = sims.map((b, i) => ({
+        b, x: sims.length === 1 ? cx : 26 + i * (W - 52) / Math.max(1, sims.length - 1), y: 30,
+      }));
+
+      // --- mesh ring: every up board (solid=joined, dashed=pending) --------
+      const mem = boards.filter((b) => b.kind === 'board' && b.up);
       const pos = mem.map((b, i) => {
-        const a = -Math.PI / 2 + i * 2 * Math.PI / mem.length;
+        const a = -Math.PI / 2 + i * 2 * Math.PI / Math.max(1, mem.length);
         return { b, x: cx + R * Math.cos(a), y: cy + R * Math.sin(a) };
       });
-      // edges: full mesh
-      tctx.strokeStyle = '#2e6f5e'; tctx.lineWidth = 1.5;
-      for (let i = 0; i < pos.length; i++)
-        for (let j = i + 1; j < pos.length; j++) {
-          tctx.beginPath(); tctx.moveTo(pos[i].x, pos[i].y);
-          tctx.lineTo(pos[j].x, pos[j].y); tctx.stroke();
-        }
-      // nodes
-      pos.forEach((p) => {
-        tctx.beginPath(); tctx.arc(p.x, p.y, 16, 0, 7);
-        tctx.fillStyle = '#143'; tctx.fill();
-        tctx.strokeStyle = '#9ece6a'; tctx.lineWidth = 2; tctx.stroke();
-        tctx.fillStyle = '#e6edf3'; tctx.font = 'bold 10px monospace';
-        tctx.textAlign = 'center'; tctx.fillText(p.b.name, p.x, p.y - 1);
-        tctx.fillStyle = '#7dcfff'; tctx.font = '9px monospace';
-        tctx.fillText('.0.0.' + p.b.node, p.x, p.y + 9);
-        tctx.textAlign = 'left';
+
+      // monitor → mesh links (dashed: the sim watches/coordinates the cell)
+      tctx.setLineDash([3, 3]); tctx.strokeStyle = '#274060'; tctx.lineWidth = 1;
+      simPos.forEach((s) => {
+        tctx.beginPath(); tctx.moveTo(s.x, s.y + 9); tctx.lineTo(cx, cy); tctx.stroke();
       });
+      tctx.setLineDash([]);
+
+      // mesh edges: full 1-hop among JOINED members
+      const jp = pos.filter((p) => p.b.joined);
+      tctx.strokeStyle = '#2e6f5e'; tctx.lineWidth = 1.5;
+      for (let i = 0; i < jp.length; i++)
+        for (let j = i + 1; j < jp.length; j++) {
+          tctx.beginPath(); tctx.moveTo(jp[i].x, jp[i].y); tctx.lineTo(jp[j].x, jp[j].y); tctx.stroke();
+        }
+
+      // board nodes
+      pos.forEach((p) => {
+        tctx.beginPath(); tctx.arc(p.x, p.y, 15, 0, 7);
+        tctx.fillStyle = p.b.joined ? '#143' : '#1a1410'; tctx.fill();
+        if (!p.b.joined) tctx.setLineDash([3, 2]);
+        tctx.strokeStyle = p.b.joined ? '#9ece6a' : '#e0af68'; tctx.lineWidth = 2; tctx.stroke();
+        tctx.setLineDash([]);
+        tctx.fillStyle = '#e6edf3'; tctx.font = 'bold 10px monospace'; tctx.textAlign = 'center';
+        tctx.fillText(p.b.name, p.x, p.y - 1);
+        tctx.fillStyle = '#7dcfff'; tctx.font = '8px monospace';
+        tctx.fillText(p.b.joined ? '.0.0.' + p.b.node : 'pending', p.x, p.y + 8);
+      });
+
+      // monitor (sim) nodes — drawn last so they sit on top
+      simPos.forEach((s) => {
+        tctx.fillStyle = '#0e1830';
+        tctx.fillRect(s.x - 24, s.y - 9, 48, 18);
+        tctx.strokeStyle = '#7aa2f7'; tctx.lineWidth = 1.5;
+        tctx.strokeRect(s.x - 24, s.y - 9, 48, 18);
+        tctx.fillStyle = '#9db8ff'; tctx.font = 'bold 8px monospace'; tctx.textAlign = 'center';
+        tctx.fillText('◆' + s.b.name, s.x, s.y + 3);
+      });
+
+      tctx.textAlign = 'left';
+      if (mem.length === 0 && sims.length === 0) {
+        tctx.fillStyle = '#566'; tctx.fillText('(scanning…)', cx - 30, cy);
+      }
+      const joined = mem.filter((b) => b.joined).length;
       tctx.fillStyle = '#8b949e'; tctx.font = '9px monospace';
-      tctx.fillText(mem.length + ' nodes · full mesh (1-hop)', 8, H - 6);
+      tctx.fillText(joined + ' mesh · ' + sims.length + ' monitor', 8, H - 6);
     }
 
     async function joinOne(b) {
+      if (b.kind === 'sim') return;   // sims are LAN coordinators, not IBSS members
       const ssid = ssidI.value.trim() || 'MANET';
       const ch = parseInt(chI.value, 10) || 6;
       const url = 'http://' + b.host + '/wifi-adhoc?ssid=' + encodeURIComponent(ssid) +
@@ -453,6 +511,7 @@
     }
 
     async function leaveOne(b) {
+      if (b.kind === 'sim') return;   // sims have no IBSS radio to drop
       log('leaving ' + b.name + ' (wifi off, radio down) ...');
       try { fetch('http://' + b.host + b.leave, { mode: 'no-cors', cache: 'no-store' }); } catch (_e) {}
       b.joined = false;
@@ -471,19 +530,28 @@
 
     function render() {
       tbody.innerHTML = boards.map((b, i) => {
+        const name = (b.kind === 'sim' ? '🖥 ' : '') + b.name;
         const link = b.up ? '<span class="state-ready">● up</span>'
                           : '<span class="state-susp">○ down</span>';
-        const vmark = b.verify === 'ok' ? '<span class="state-ready">✓ ' + (b.dims || 'ok') + '</span>'
-                    : b.verify === 'fail' ? '<span class="state-susp">✗</span>'
-                    : '<span style="color:#566">–</span>';
-        const meship = '10.0.0.' + b.node;
-        return '<tr><td>' + b.name + '</td><td>' + b.host + '</td><td>' + link +
-          '</td><td>' + vmark +
-          '</td><td>' + (b.joined ? '<span class="actor-mark">' + meship + '</span>' : meship) +
-          '</td><td>' +
-          '<button data-join="' + i + '" style="font-size:11px">Join</button> ' +
-          '<button data-leave="' + i + '" style="font-size:11px">Leave</button>' +
-          '</td></tr>';
+        const lat = b.lat == null ? '<span style="color:#566">–</span>'
+                  : '<span style="color:' + (b.lat < 60 ? '#9ece6a' : b.lat < 300 ? '#e0af68' : '#f7768e') +
+                    '">' + Math.round(b.lat) + 'ms</span>';
+        const cap = b.cap != null ? '<span class="actor-mark">' + b.cap + '</span>' +
+                      (b.sp ? ' <span style="color:#7aa2f7">' + b.sp.toFixed(1) + 'x</span>' : '')
+                  : (b.cores ? b.cores + 'c' : '<span style="color:#566">–</span>');
+        let meshcell;
+        if (b.kind === 'sim') {
+          meshcell = '<span style="color:#7aa2f7">◆ monitor</span> ' +
+            '<button data-restart="' + i + '" style="font-size:11px">↻ Restart</button>';
+        } else {
+          const meship = b.joined ? '<span class="actor-mark">10.0.0.' + b.node + '</span> '
+                                  : '<span style="color:#8b949e">10.0.0.' + b.node + '</span> ';
+          meshcell = meship +
+            '<button data-join="' + i + '" style="font-size:11px">Join</button> ' +
+            '<button data-leave="' + i + '" style="font-size:11px">Leave</button>';
+        }
+        return '<tr><td>' + name + '</td><td>' + b.host + '</td><td>' + link +
+          '</td><td>' + lat + '</td><td>' + cap + '</td><td>' + meshcell + '</td></tr>';
       }).join('');
       tbody.querySelectorAll('[data-join]').forEach((btn) => {
         btn.onclick = () => joinOne(boards[+btn.getAttribute('data-join')]);
@@ -491,7 +559,28 @@
       tbody.querySelectorAll('[data-leave]').forEach((btn) => {
         btn.onclick = () => leaveOne(boards[+btn.getAttribute('data-leave')]);
       });
+      tbody.querySelectorAll('[data-restart]').forEach((btn) => {
+        btn.onclick = () => restartSim(boards[+btn.getAttribute('data-restart')]);
+      });
       drawMesh();
+    }
+
+    // Remotely restart a Xinu simulator (OCaml VM) via its /api/restart route —
+    // the server relaunches a fresh copy of itself on the same port.  Recovers a
+    // wedged sim without physical access.  No response = expected (it exited).
+    async function restartSim(b) {
+      log('restarting ' + b.name + ' (' + b.host + ') remotely via /api/restart ...');
+      try {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), 3000);
+        const r = await fetch('http://' + b.host + '/api/restart', { cache: 'no-store', signal: ctl.signal });
+        clearTimeout(t);
+        log('  ' + b.name + ': ' + (await r.text()).trim());
+      } catch (_e) {
+        log('  ' + b.name + ': restart issued (relaunching — brief downtime expected)');
+      }
+      b.up = false; b.lat = null; render();
+      setTimeout(() => probe(b).then(render), 3000);   // re-probe after it comes back
     }
 
     // Full live status: LAN reachability + REAL mesh membership, then explain
@@ -501,8 +590,9 @@
           boards.length + ' boards (LAN /fb + mesh status) ===');
       await Promise.all(boards.map(probe));
       await Promise.all(boards.map(async (b) => {
-        b.joined = b.up ? await detectJoined(b) : false;
+        b.joined = (b.up && b.kind !== 'sim') ? await detectJoined(b) : false;
       }));
+      publishPerf();
       render();
       const meshed = boards.filter((b) => b.joined);
       const reasons = [];
@@ -527,38 +617,163 @@
       }
     }
 
-    // Scan a small LAN range for additional Xinu boards (CORS /fb on port 80).
-    async function scan() {
-      log('scanning 192.168.3.2..120:80 for Xinu /fb endpoints ...');
-      const found = [];
-      const probes = [];
-      for (let i = 2; i <= 120; i++) {
-        const host = '192.168.3.' + i;
-        if (boards.some((b) => b.host.split(':')[0] === host)) continue;
-        probes.push((async () => {
-          try {
-            const ctl = new AbortController();
-            const t = setTimeout(() => ctl.abort(), 1500);
-            const r = await fetch('http://' + host + '/fb?w=16', { cache: 'no-store', signal: ctl.signal });
-            clearTimeout(t);
-            if (r.ok) found.push(host);
-          } catch (_e) {}
-        })());
+    // Classify one host:port — 'board' (real Pi: CORS /fb HDMI mirror, joins the
+    // IBSS mesh) or 'sim' (OCaml aice-avm VM: /api/console, a LAN coordinator) or
+    // null.  Used by both the manual Scan button and the auto-pilot sweep.
+    async function classify(hp) {
+      async function ok(path) {
+        try {
+          const ctl = new AbortController();
+          const t = setTimeout(() => ctl.abort(), 1200);
+          const r = await fetch('http://' + hp + path, { cache: 'no-store', signal: ctl.signal });
+          clearTimeout(t);
+          return r.ok;
+        } catch (_e) { return false; }
       }
-      await Promise.all(probes);
-      if (!found.length) log('scan: no additional Xinu boards found (known 3 already listed).');
-      found.forEach((host, k) => {
-        if (boards.some((b) => b.host === host)) return;
-        boards.push({ name: 'xinu?', host, node: boards.length + 1, up: true, joined: false });
-        log('scan: found Xinu at ' + host + ' -> added as node ' + boards.length);
-      });
+      if (await ok('/fb?w=16')) return 'board';
+      if (await ok('/api/console')) return 'sim';
+      return null;
+    }
+
+    // Sweep the LAN (both :80 and :8080) for Xinu not already in the table and
+    // merge any new ones.  Returns the list of newly added boards.
+    async function sweepInto() {
+      const cand = [];
+      for (let i = 2; i <= 254; i++)
+        for (const port of [80, 8080]) {
+          const hp = '192.168.3.' + i + (port === 80 ? '' : ':' + port);
+          if (boards.some((b) => b.host === hp)) continue;
+          cand.push(hp);
+        }
+      const added = [];
+      // bounded concurrency so a full /24 sweep doesn't open 500 sockets at once
+      let idx = 0;
+      async function worker() {
+        while (idx < cand.length) {
+          const hp = cand[idx++];
+          const kind = await classify(hp);
+          if (!kind) continue;
+          if (boards.some((b) => b.host === hp)) continue;
+          const node = boards.length + 1;
+          const nb = {
+            name: (kind === 'sim' ? 'sim' : 'xinu') + node, host: hp, node, kind,
+            via: kind === 'sim' ? null : 'shell', leave: '/shell?cmd=wifi+off',
+            up: true, joined: false, verify: '?', dims: '',
+            lat: null, cores: null, sp: null, cap: null, lastJoinAt: 0, seen: Date.now(),
+          };
+          boards.push(nb); added.push(nb);
+          log('discovered ' + kind + ' at ' + hp + ' → node ' + node);
+        }
+      }
+      await Promise.all(Array.from({ length: 24 }, worker));
+      return added;
+    }
+
+    async function scan() {
+      log('scanning 192.168.3.0/24 (:80 + :8080) for Xinu boards & sims ...');
+      const added = await sweepInto();
+      if (!added.length) log('scan: no new Xinu found (' + boards.length + ' already tracked).');
+      await Promise.all(boards.map(probe));
       render();
+    }
+
+    // Capacity probe for the load-distribution table: a short SMP primes run
+    // gives cores_online + speedup; capacity ≈ cores*speedup scaled by 1/time
+    // (higher = more parallel headroom for actor placement).  Boards only.
+    async function refreshPerf(b) {
+      if (b.kind === 'sim' || !b.up) return;
+      const hp = hostPort(b.host);
+      try {
+        const r = await fetch('/mesh/bench?host=' + hp.h + '&port=' + hp.port +
+                              '&kind=primes&n=120000', { cache: 'no-store' });
+        const t = (await r.text()).trim();
+        const cores = (t.match(/cores_online\s*=\s*([0-9]+)/i) || [])[1];
+        const spx   = (t.match(/speedup\s*x100\s*=\s*([0-9]+)/i) || [])[1];
+        const all   = (t.match(/N-core\s*ms\s*=\s*([0-9]+)/i) || [])[1];
+        if (cores) b.cores = parseInt(cores, 10);
+        if (spx)   b.sp = parseInt(spx, 10) / 100;
+        if (all)   b.cap = Math.round((b.cores || 1) * (b.sp || 1) * 1000 / Math.max(1, parseInt(all, 10)));
+      } catch (_e) {}
+    }
+
+    // Publish a live, sorted perf snapshot so a load-balancer / actor-placement
+    // policy can pick the highest-capacity, lowest-latency mesh member.
+    function publishPerf() {
+      const snap = boards.filter((b) => b.up).map((b) => ({
+        name: b.name, host: b.host, node: b.node, kind: b.kind, joined: b.joined,
+        lat: b.lat == null ? null : Math.round(b.lat),
+        cores: b.cores, speedup: b.sp, capacity: b.cap, seen: b.seen,
+      }));
+      // best target first: most capacity, then lowest latency
+      snap.sort((a, z) => (z.capacity || 0) - (a.capacity || 0) ||
+                          ((a.lat == null ? 1e9 : a.lat) - (z.lat == null ? 1e9 : z.lat)));
+      window.__MESH_PERF = { ts: Date.now(), nodes: snap };
+      return snap;
+    }
+
+    // One monitor tick: discover (periodically) → probe liveness+latency →
+    // detect real mesh membership → auto-join stragglers → refresh capacity →
+    // publish the perf table.  Guarded by `busy` so ticks never overlap.
+    async function monitorTick() {
+      if (busy) return; busy = true;
+      try {
+        tickN++;
+        if (tickN % SWEEP_EVERY === 1) await sweepInto();
+        await Promise.all(boards.map(probe));
+        await Promise.all(boards.map(async (b) => {
+          b.joined = (b.up && b.kind !== 'sim') ? await detectJoined(b) : false;
+        }));
+        if (autoOn) {
+          const now = Date.now();
+          for (const b of boards) {
+            if (b.kind === 'board' && b.up && !b.joined && now - (b.lastJoinAt || 0) > 45000) {
+              b.lastJoinAt = now;
+              log('auto-join ' + b.name + ' (up on LAN, not on mesh) → 10.0.0.' + b.node);
+              joinOne(b);
+            }
+          }
+        }
+        if (tickN % SMP_EVERY === 2)
+          for (const b of boards.filter((x) => x.up && x.kind === 'board')) await refreshPerf(b);
+        publishPerf();
+        render();
+      } finally { busy = false; }
+    }
+
+    function setAuto(on) {
+      autoOn = on;
+      const btn = node.querySelector('[data-act="auto"]');
+      if (btn) { btn.textContent = on ? '⏸ Auto ON' : '▶ Auto'; btn.style.color = on ? '#9ece6a' : ''; }
+      if (on && !autoTimer) {
+        log('=== AUTO-PILOT ON: monitoring net every ' + (TICK_MS / 1000) +
+            's, auto-joining boards, keeping the perf table ===');
+        autoTimer = setInterval(monitorTick, TICK_MS);
+        monitorTick();
+      } else if (!on && autoTimer) {
+        clearInterval(autoTimer); autoTimer = null;
+        log('=== AUTO-PILOT OFF ===');
+      }
     }
 
     // Run a benchmark across every reachable board and tabulate the results.
     // primes uses each board's real SMP benchmark (/smp-bench via the proxy);
     // nqueens/dining need a board-side route that isn't flashed yet.
     async function runBench(kind) {
+      // MAKINA-7: push the AVM2 binary-mesh blender display to rpi5 (the board
+      // with the B+B' kernel) via the server-side /mesh/loadvm proxy, then open
+      // its HDMI mirror so the turntable is visible.
+      if (kind === 'makina') {
+        const host = '192.168.3.101', port = 80;
+        log('=== MAKINA-7: uploading AVM2 mesh (MakinaMesh.avm) to rpi5 ' + host + ' ===');
+        try {
+          const r = await fetch('/mesh/loadvm?host=' + host + '&port=' + port + '&file=MakinaMesh.avm',
+                                { cache: 'no-store' });
+          log('  ' + (await r.text()).trim());
+        } catch (e) { log('  upload failed: ' + e); return; }
+        openPiScreen({ title: 'rpi5 Screen (HDMI)', host: '192.168.3.101', x: 720, y: 300 });
+        log('  opened rpi5 HDMI mirror — MAKINA-7 should be rotating (z-buffered turntable).');
+        return;
+      }
       const up = boards.filter((b) => b.up);
       if (!up.length) { log('bench: no reachable boards — run Refresh Status first.'); return; }
       if (kind === 'primes') {
@@ -597,7 +812,8 @@
 
     node.querySelector('.basic-toolbar').addEventListener('click', (e) => {
       const act = e.target.getAttribute('data-act');
-      if (act === 'scan') scan();
+      if (act === 'auto') setAuto(!autoOn);
+      else if (act === 'scan') scan();
       else if (act === 'verify') verify();
       else if (act === 'verifybuild') verifyAndBuild();
       else if (act === 'refresh') refreshStatus();
@@ -613,8 +829,8 @@
     });
 
     render();
-    refreshStatus();
-    xlog('[mesh] Mesh Control Center opened', 'boot-ok');
+    setAuto(true);   // start continuously monitoring + auto-joining on open
+    xlog('[mesh] Mesh Control Center opened (auto-pilot ON)', 'boot-ok');
   }
 
   // Live actor drawing from the host VM: polls /api/lines and renders the

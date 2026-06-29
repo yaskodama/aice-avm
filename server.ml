@@ -454,6 +454,71 @@ let http_get_lan host port path =
     if i >= 0 then String.sub s (i + 4) (String.length s - i - 4) else s
   with e -> Printf.sprintf "proxy-error: %s" (Printexc.to_string e)
 
+(* Outbound HTTP/1.0 POST of a binary body to a board (e.g. one /actor/loadvm
+   chunk).  Returns the response body. *)
+let http_post_lan host port path (body : string) =
+  try
+    let he = Unix.gethostbyname host in
+    let addr = Unix.ADDR_INET (he.Unix.h_addr_list.(0), port) in
+    let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+    (try Unix.setsockopt_float fd Unix.SO_RCVTIMEO 25.0 with _ -> ());
+    (try Unix.setsockopt_float fd Unix.SO_SNDTIMEO 15.0 with _ -> ());
+    Unix.connect fd addr;
+    let hdr = Printf.sprintf
+      "POST %s HTTP/1.0\r\nHost: %s\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"
+      path host (String.length body) in
+    ignore (Unix.write_substring fd hdr 0 (String.length hdr));
+    let n = String.length body and off = ref 0 in
+    (try while !off < n do
+       let k = Unix.write_substring fd body !off (min 16384 (n - !off)) in
+       if k <= 0 then raise Exit; off := !off + k
+     done with _ -> ());
+    let buf = Buffer.create 512 and chunk = Bytes.create 4096 in
+    (try let rec loop () =
+       let k = Unix.read fd chunk 0 (Bytes.length chunk) in
+       if k > 0 then (Buffer.add_subbytes buf chunk 0 k; loop ()) in loop ()
+     with _ -> ());
+    (try Unix.close fd with _ -> ());
+    let s = Buffer.contents buf in
+    let i = find_sub s "\r\n\r\n" in
+    if i >= 0 then String.sub s (i + 4) (String.length s - i - 4) else s
+  with e -> Printf.sprintf "post-error: %s" (Printexc.to_string e)
+
+(* /mesh/loadvm?host=H[&port=P][&file=NAME] — chunk-upload a local meshes/NAME.avm
+   to a board's /actor/loadvm (rpi5 protocol: POST ?off=&total= chunks, then
+   GET ?go=1&len=) so the Mesh Control Center can push the blender display
+   (e.g. MAKINA-7) with one click.  file= is a basename (no path traversal). *)
+let mesh_loadvm path =
+  let host = str_param path "host" in
+  let port = let p = int_param path "port" in if p = 0 then 80 else p in
+  let file = let f = str_param path "file" in if f = "" then "MakinaMesh.avm" else f in
+  let base = Filename.basename file in           (* strip any directory part *)
+  if host = "" then "loadvm-error: missing host"
+  else
+    let fpath = Filename.concat "meshes" base in
+    try
+      let ic = open_in_bin fpath in
+      let len = in_channel_length ic in
+      let data = really_input_string ic len in
+      close_in ic;
+      let csz = 60000 and off = ref 0 and nchunk = ref 0 and ok = ref true in
+      while !off < len && !ok do
+        let sz = min csz (len - !off) in
+        let r = http_post_lan host port
+                  (Printf.sprintf "/actor/loadvm?off=%d&total=%d" !off len)
+                  (String.sub data !off sz) in
+        if find_sub r "ok off=" < 0 then ok := false;
+        incr nchunk; off := !off + sz
+      done;
+      if not !ok then Printf.sprintf "loadvm: chunk upload failed at off=%d" !off
+      else
+        let run = http_get_lan host port (Printf.sprintf "/actor/loadvm?go=1&len=%d" len) in
+        Printf.sprintf "uploaded %s (%d bytes, %d chunks) -> %s : %s"
+          base len !nchunk host (String.trim run)
+    with
+    | Sys_error m -> Printf.sprintf "loadvm-error: %s (have meshes/%s?)" m base
+    | e -> Printf.sprintf "loadvm-error: %s" (Printexc.to_string e)
+
 (* /mesh/bench?host=H[&port=P]&kind=primes[&n=N] — run a benchmark on one mesh
    board and return its raw text result (proxied; bypasses CORS). *)
 let mesh_bench path =
@@ -482,6 +547,21 @@ let ask_console nbytes =
   (try match String.trim (String.lowercase_ascii (input_line stdin)) with
        | "y" | "yes" -> true | _ -> false
    with End_of_file -> false)
+
+(* ---- remote restart ----------------------------------------------------
+   /api/restart re-launches a fresh copy of this server on the same port and
+   exits the current one.  We close the listener first so the child can re-bind
+   (SO_REUSEADDR covers any lingering TIME_WAIT).  Cross-platform: uses
+   create_process rather than execv — execv's Windows emulation keeps the old
+   process alive holding the port.  Reachable even while an actor wedges a
+   handler thread, because the accept loop keeps spawning new threads. *)
+let listen_sock : Unix.file_descr option ref = ref None
+let do_restart () =
+  (match !listen_sock with Some s -> (try Unix.close s with _ -> ()) | None -> ());
+  (try ignore (Unix.create_process Sys.executable_name Sys.argv
+                 Unix.stdin Unix.stdout Unix.stderr)
+   with _ -> ());
+  exit 0
 
 let handle rt fd =
   let buf = Buffer.create 8192 in
@@ -540,7 +620,13 @@ let handle rt fd =
           (Avm.actor_table rt);
         http_text (Buffer.contents b)
       end
+      else if starts_with path "/api/restart" || path = "/restart" then begin
+        (* respond first, then relaunch shortly so the client sees the ack *)
+        ignore (Thread.create (fun () -> Thread.delay 0.3; do_restart ()) ());
+        http_text "restarting aice-avm (fresh process on the same port)...\r\n"
+      end
       else if starts_with path "/mesh/bench" then http_text (mesh_bench path)
+      else if starts_with path "/mesh/loadvm" then http_text (mesh_loadvm path)
       else if starts_with path "/mesh/cmd" then http_text (mesh_cmd path)
       else if starts_with path "/editor" then http_html editor_page
       else if path = "/graphics" then http_html page
@@ -575,6 +661,7 @@ let () =
       else (try the_port := int_of_string a with _ -> ())) Sys.argv;
   let rt = Avm.create_runtime io in
   let (s, bind_desc) = make_listen !the_port in
+  listen_sock := Some s;     (* so /api/restart can free the port before relaunch *)
   Printf.printf "[aice-avm] receiver listening on %s  (accept-prompt: %s)\n%!"
     bind_desc (if !ask_default then "on" else "off");
   Printf.printf "[aice-avm] graphics window: open  http://localhost:%d/  in your browser.\n%!" !the_port;
@@ -584,5 +671,7 @@ let () =
   open_browser ();
   while true do
     let (fd, _) = Unix.accept s in
+    (* don't leak this client fd into a child spawned by /api/restart *)
+    (try Unix.set_close_on_exec fd with _ -> ());
     ignore (Thread.create (fun () -> handle rt fd) ())
   done
