@@ -1144,6 +1144,15 @@
     mkavm(['home', 'xinu'], 'MAKINA-7.avm', { kind: 'mesh', mesh: 'MAKINA', title: 'MAKINA-7' },
       'AVM module: MAKINA-7 (3D mesh turntable display)\n' +
       'Double-click in avm Finder to run — opens the software 3D Display.\n');
+    // The real MAKINA-7 character baked into an ACTOR .avm: 3 actors
+    // (Main/Makina/Display) stream 10500 solid triangles to the host VM's
+    // op_tri "Blender display", shown live in the VM Graphics window.
+    mkavm(['home', 'xinu'], 'MakinaActor.avm',
+      { kind: 'actor', src: '/avm/MakinaActor.avm', title: 'MAKINA-7 (actor)' },
+      'AVM actor module: MAKINA-7 (real mesh, 10500 tris).\n' +
+      'Main spawns Makina + Display; Makina streams triangles to the Display\n' +
+      'actor, which drives the kernel op_tri Blender display. Double-click to\n' +
+      'load it into the host VM — it renders live in the VM Graphics window.\n');
     mkdir(['dev']);
     mkfile(['dev'], 'console', '(the live VM console — see the Xinu Console window)\n');
     mkdir(['tmp']);
@@ -1905,6 +1914,19 @@
     if (d && d.kind === 'mesh') {
       openDisplay({ mesh: d.mesh || 'MAKINA', title: d.title || f.name.replace(/\.avm$/i, '') });
       xlog('[avm] ' + (d.title || f.name) + ' → 3D Display', 'boot-ok');
+    } else if (d && d.kind === 'actor' && d.src) {
+      // Ship the actor .avm to the host VM; its actors stream tris to the
+      // op_tri "Blender display", which the VM Graphics window renders live.
+      openVmGraphics();
+      xlog('[avm] loading ' + f.name + ' into the host VM …', 'boot-info');
+      (async () => {
+        try {
+          const bytes = await (await fetch(d.src, { cache: 'no-store' })).arrayBuffer();
+          const r = await fetch('/actor/loadvm?noask=1', { method: 'POST', body: bytes });
+          xlog('[avm] host VM: ' + (await r.text()).trim(), 'boot-ok');
+          xlog('[avm] ' + (d.title || f.name) + ' streaming to VM Graphics (Blender display)', 'boot-ok');
+        } catch (e) { xlog('[avm] load failed: ' + e, 'boot-warn'); }
+      })();
     } else {
       openLoader();
       xlog('[avm] ' + f.name + ' → Actor Loader (no display descriptor)', 'boot-info');
@@ -1955,13 +1977,14 @@
         return;
       }
       files.forEach((f) => {
-        const isMesh = f.node.avm && f.node.avm.kind === 'mesh';
+        const kind = f.node.avm && f.node.avm.kind;
+        const icon = kind === 'mesh' ? '🧊' : kind === 'actor' ? '🤖' : '📦';
         const el = document.createElement('div');
         el.className = 'avf-item';
         el.title = f.path;
         el.style.cssText = 'width:88px;text-align:center;cursor:pointer;border-radius:8px;padding:8px 4px';
         el.innerHTML =
-          '<div style="font-size:34px;line-height:1">' + (isMesh ? '🧊' : '📦') + '</div>' +
+          '<div style="font-size:34px;line-height:1">' + icon + '</div>' +
           '<div style="font-size:11px;color:#d8dee9;word-break:break-all;margin-top:3px">' + escapeHtml(f.name) + '</div>' +
           '<div style="font-size:9px;color:#566;word-break:break-all">' + escapeHtml(f.path) + '</div>';
         el.addEventListener('click', () => {
