@@ -118,8 +118,75 @@
     return { win, body, focus };
   }
 
+  // ---- desktop context menu -------------------------------------------
+  // Shift+click (or right-click on Windows) an empty desktop area pops up a
+  // small menu that launches an extra Shell (xsh) or BASIC window at the click.
+  let desktopInfo = { build: 'aice-avm' };
+
+  function closeDesktopMenu() {
+    const m = document.getElementById('desktop-menu');
+    if (m) m.remove();
+  }
+
+  function showDesktopMenu(px, py) {
+    closeDesktopMenu();
+    const menu = document.createElement('div');
+    menu.id = 'desktop-menu';
+    menu.style.cssText =
+      'position:fixed;z-index:100000;min-width:170px;background:#0e1626;' +
+      'border:1px solid #2b3650;border-radius:8px;padding:4px;' +
+      'box-shadow:0 10px 28px rgba(0,0,0,.55);font-family:inherit;font-size:13px;' +
+      'color:#d8dee9;user-select:none';
+    const header = document.createElement('div');
+    header.textContent = 'New window';
+    header.style.cssText = 'padding:4px 12px 6px;color:#8b949e;font-size:11px;border-bottom:1px solid #1c2740;margin-bottom:4px';
+    menu.appendChild(header);
+    const items = [
+      { label: '🖥  シェル (Shell)', act: () => openConsole(desktopInfo, { primary: false, title: 'xsh (shell)', x: px, y: py }) },
+      { label: '📝  BASIC',          act: () => openBasic({ x: px, y: py }) },
+    ];
+    items.forEach((it) => {
+      const el = document.createElement('div');
+      el.textContent = it.label;
+      el.style.cssText = 'padding:7px 12px;border-radius:6px;cursor:pointer;white-space:nowrap';
+      el.addEventListener('mouseenter', () => { el.style.background = '#1b2942'; });
+      el.addEventListener('mouseleave', () => { el.style.background = ''; });
+      el.addEventListener('click', (e) => { e.stopPropagation(); closeDesktopMenu(); it.act(); });
+      menu.appendChild(el);
+    });
+    document.body.appendChild(menu);
+    // clamp to viewport so the menu never opens off-screen near the edges
+    const r = menu.getBoundingClientRect();
+    menu.style.left = Math.min(px, window.innerWidth  - r.width  - 6) + 'px';
+    menu.style.top  = Math.min(py, window.innerHeight - r.height - 6) + 'px';
+  }
+
+  function wireDesktopMenu() {
+    const desktopEl = document.getElementById('desktop');
+    // Shift+click on empty desktop → menu. Plain click elsewhere closes it.
+    desktopEl.addEventListener('click', (e) => {
+      if (e.shiftKey && e.target === desktopEl) { e.preventDefault(); showDesktopMenu(e.clientX, e.clientY); }
+      else closeDesktopMenu();
+    });
+    // Right-click on empty desktop → same menu (Windows-style). Leave the
+    // native context menu intact when right-clicking inside a window (text, etc).
+    desktopEl.addEventListener('contextmenu', (e) => {
+      if (e.target !== desktopEl) return;
+      e.preventDefault();
+      showDesktopMenu(e.clientX, e.clientY);
+    });
+    // Dismiss on any outside mousedown / Escape.
+    document.addEventListener('mousedown', (e) => {
+      const m = document.getElementById('desktop-menu');
+      if (m && !m.contains(e.target)) closeDesktopMenu();
+    });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDesktopMenu(); });
+  }
+
   // ---- desktop boot ----------------------------------------------------
   function startDesktop(info) {
+    desktopInfo = info;
+    wireDesktopMenu();
     openProcesses();
     openVmGraphics();
     openDisplay();
@@ -1039,11 +1106,83 @@
   }
 
   // Console + tiny shell
-  function openConsole(info) {
+  // ---- in-memory hierarchical filesystem (shared across all shells) ----
+  // A tiny Unix-like VFS. Nodes are { type:'dir', children:{name:node} } or
+  // { type:'file', data:string }. Every xsh shell shares this one tree but
+  // keeps its own current-working-directory, so `mkdir` in one shell is
+  // visible from another.
+  const fsRoot = { type: 'dir', children: {} };
+
+  function fsSeed() {
+    function mkdir(parts) {
+      let node = fsRoot;
+      for (const name of parts) {
+        if (!node.children[name]) node.children[name] = { type: 'dir', children: {} };
+        node = node.children[name];
+      }
+      return node;
+    }
+    function mkfile(dirParts, name, data) { mkdir(dirParts).children[name] = { type: 'file', data }; }
+    mkfile(['home', 'xinu'], 'readme.txt',
+      'Welcome to the Xinu/AIPL host VM (aice-avm).\n' +
+      'This is an in-memory hierarchical filesystem.\n' +
+      'Try: ls, pwd, cd, cat, mkdir, touch, rm, echo, tree.\n');
+    mkfile(['home', 'xinu'], 'hello.bas',
+      '10 PRINT "HELLO FROM XINU BASIC"\n20 FOR I=1 TO 5\n30 PRINT I\n40 NEXT I\n');
+    mkdir(['home', 'xinu', 'projects']);
+    mkfile(['etc'], 'motd', 'Xinu/AIPL host VM — actors over HTTP, no recompile.\n');
+    mkfile(['etc'], 'version', 'aice-avm host VM\nbrowser desktop simulator\n');
+    mkfile(['actors'], 'PingPong.abcl',
+      'class Main {\n  method tick() { send new Ping().go(3); }\n}\n');
+    mkdir(['dev']);
+    mkfile(['dev'], 'console', '(the live VM console — see the Xinu Console window)\n');
+    mkdir(['tmp']);
+  }
+  fsSeed();
+
+  // Resolve a path (absolute or relative to cwd) to an array of name parts,
+  // collapsing '.' and '..'. cwd is an absolute path string like '/home/xinu'.
+  function fsResolveParts(cwd, path) {
+    const base = path.startsWith('/') ? [] : cwd.split('/').filter(Boolean);
+    const stack = base.slice();
+    for (const p of path.split('/').filter(Boolean)) {
+      if (p === '.') continue;
+      else if (p === '..') stack.pop();
+      else stack.push(p);
+    }
+    return stack;
+  }
+  function fsPartsToPath(parts) { return '/' + parts.join('/'); }
+  function fsLookup(parts) {
+    let node = fsRoot;
+    for (const name of parts) {
+      if (node.type !== 'dir') return null;
+      node = node.children[name];
+      if (!node) return null;
+    }
+    return node;
+  }
+  function fsParentAndName(parts) {
+    return { parent: fsLookup(parts.slice(0, -1)), name: parts[parts.length - 1] };
+  }
+  function stripQuotes(s) {
+    s = s.trim();
+    if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) return s.slice(1, -1);
+    return s;
+  }
+
+  function openConsole(info, opts) {
+    // primary = the desktop's main console (streams boot log, owns window.__xinuLog).
+    // Extra shells spawned from the desktop menu pass { primary:false } and get
+    // their own independent xsh prompt without hijacking the global log sink.
+    const primary = !(opts && opts.primary === false);
     const node = document.createElement('div');
     node.innerHTML = '<div class="con-out"></div>';
     const out = node.querySelector('.con-out');
-    const { win, body } = makeWindow({ title: 'Xinu Console', x: 30, y: 24, w: 440, h: 260, node });
+    const { win, body } = makeWindow({ title: (opts && opts.title) || 'Xinu Console',
+      x: (opts && opts.x != null) ? opts.x : 30,
+      y: (opts && opts.y != null) ? opts.y : 24,
+      w: 440, h: 260, node });
     // The console may open behind other windows, and makeWindow only raises a
     // window (z-index) on mousedown without focusing anything inside it — so a
     // click on the console would leave the shell input unfocused/uncovered by a
@@ -1053,7 +1192,7 @@
       if (inp) setTimeout(() => inp.focus(), 0);
     });
 
-    const bootLines = (info.bootLog || [
+    const bootLines = primary ? (info.bootLog || [
       'Xinu booting on arm-rpi3 (BCM2837, cortex-a53)...',
       'memory: heap 0x00400000 - 0x3F000000',
       'sysinit: 50 processes, 100 semaphores',
@@ -1061,7 +1200,10 @@
       'usbinit: keyboard, mouse attached',
       'wm: window manager started',
       'shell: ready',
-    ]);
+    ]) : [
+      'xsh: new interactive shell (build ' + (info.build || 'web') + ')',
+      'shell: ready — type help',
+    ];
     let i = 0;
     (function stream() {
       if (i < bootLines.length) {
@@ -1085,7 +1227,8 @@
       body.scrollTop = body.scrollHeight;
     }
     // Let other windows (Actor Loader) echo activity into the console.
-    window.__xinuLog = (t, cls) => println(t, cls);
+    // Only the primary console owns this global sink; extra shells stay local.
+    if (primary) window.__xinuLog = (t, cls) => println(t, cls);
 
     // aice-avm: stream the host VM's actor print output into the console.
     if (window.__XINU_AVM) {
@@ -1101,10 +1244,15 @@
       }, 700);
     }
 
+    // Each shell keeps its own current directory into the shared VFS.
+    let cwd = fsLookup(['home', 'xinu']) ? '/home/xinu' : '/';
+    function ps1() { return 'xsh:' + cwd + '$'; }
+
     function addPrompt() {
       const line = document.createElement('div');
       line.className = 'con-input';
-      line.innerHTML = '<span class="ps1">xsh$</span><input type="text" autocomplete="off" spellcheck="false">';
+      line.innerHTML = '<span class="ps1"></span><input type="text" autocomplete="off" spellcheck="false">';
+      line.querySelector('.ps1').textContent = ps1();
       out.appendChild(line);
       const input = line.querySelector('input');
       input.focus();
@@ -1112,7 +1260,7 @@
       input.addEventListener('keydown', (e) => {
         if (e.key !== 'Enter') return;
         const cmd = input.value.trim();
-        input.parentElement.innerHTML = '<span class="ps1">xsh$</span> ' + escapeHtml(cmd);
+        input.parentElement.innerHTML = '<span class="ps1">' + escapeHtml(ps1()) + '</span> ' + escapeHtml(cmd);
         runCmd(cmd);
         addPrompt();
       });
@@ -1123,7 +1271,10 @@
       const c = (a[0] || '').toLowerCase();
       if (!c) return;
       switch (c) {
-        case 'help': println('commands: help ver ps clear date echo basic loadvm blender rpi3 rpi4 rpi5 mesh about'); break;
+        case 'help':
+          println('files: ls pwd cd cat mkdir touch rm echo tree');
+          println('system: help ver ps clear date basic loadvm blender rpi3 rpi4 rpi5 mesh about');
+          break;
         case 'ver': println('Xinu (browser sim) — AIPL/AICE edition, build ' + (info.build || 'web')); break;
         case 'about': println('Embedded Xinu desktop simulator. Multi-window WM + BASIC.'); break;
         case 'ps':
@@ -1132,8 +1283,105 @@
               p.actor ? 'boot-ok' : ''));
           break;
         case 'date': println(new Date().toString()); break;
-        case 'echo': println(cmd.slice(5)); break;
         case 'clear': out.querySelectorAll('.con-line').forEach((n) => n.remove()); break;
+
+        // ---- filesystem commands ----
+        case 'pwd': println(cwd); break;
+
+        case 'ls': {
+          const targ = a[1] || '.';
+          const node = fsLookup(fsResolveParts(cwd, targ));
+          if (!node) { println('ls: ' + targ + ': No such file or directory', 'boot-warn'); break; }
+          if (node.type === 'file') { println(targ); break; }
+          const names = Object.keys(node.children).sort();
+          if (!names.length) break;
+          names.forEach((n) => {
+            const child = node.children[n];
+            println(child.type === 'dir' ? n + '/' : n, child.type === 'dir' ? 'boot-info' : '');
+          });
+          break;
+        }
+
+        case 'cd': {
+          const targ = a[1] || '/home/xinu';
+          const parts = fsResolveParts(cwd, targ);
+          const node = fsLookup(parts);
+          if (!node) { println('cd: ' + targ + ': No such file or directory', 'boot-warn'); break; }
+          if (node.type !== 'dir') { println('cd: ' + targ + ': Not a directory', 'boot-warn'); break; }
+          cwd = fsPartsToPath(parts);
+          break;
+        }
+
+        case 'cat': {
+          if (!a[1]) { println('usage: cat <file>'); break; }
+          const node = fsLookup(fsResolveParts(cwd, a[1]));
+          if (!node) { println('cat: ' + a[1] + ': No such file or directory', 'boot-warn'); break; }
+          if (node.type === 'dir') { println('cat: ' + a[1] + ': Is a directory', 'boot-warn'); break; }
+          const text = node.data || '';
+          if (text !== '') text.replace(/\n$/, '').split('\n').forEach((ln) => println(ln));
+          break;
+        }
+
+        case 'mkdir': {
+          if (!a[1]) { println('usage: mkdir <dir>'); break; }
+          const { parent, name } = fsParentAndName(fsResolveParts(cwd, a[1]));
+          if (!parent || parent.type !== 'dir') { println('mkdir: ' + a[1] + ': No such file or directory', 'boot-warn'); break; }
+          if (parent.children[name]) { println('mkdir: ' + a[1] + ': File exists', 'boot-warn'); break; }
+          parent.children[name] = { type: 'dir', children: {} };
+          break;
+        }
+
+        case 'touch': {
+          if (!a[1]) { println('usage: touch <file>'); break; }
+          const { parent, name } = fsParentAndName(fsResolveParts(cwd, a[1]));
+          if (!parent || parent.type !== 'dir') { println('touch: ' + a[1] + ': No such file or directory', 'boot-warn'); break; }
+          if (!parent.children[name]) parent.children[name] = { type: 'file', data: '' };
+          break;
+        }
+
+        case 'rm': {
+          let rec = false, targ = a[1];
+          if (a[1] === '-r' || a[1] === '-rf' || a[1] === '-R') { rec = true; targ = a[2]; }
+          if (!targ) { println('usage: rm [-r] <path>'); break; }
+          const parts = fsResolveParts(cwd, targ);
+          if (!parts.length) { println('rm: cannot remove /', 'boot-warn'); break; }
+          const node = fsLookup(parts);
+          if (!node) { println('rm: ' + targ + ': No such file or directory', 'boot-warn'); break; }
+          if (node.type === 'dir' && !rec) { println('rm: ' + targ + ': is a directory (use -r)', 'boot-warn'); break; }
+          const { parent, name } = fsParentAndName(parts);
+          delete parent.children[name];
+          break;
+        }
+
+        case 'echo': {
+          const rest = cmd.slice(4).replace(/^\s+/, '');
+          const m = rest.match(/^(.*?)\s*(>>|>)\s*(\S+)\s*$/);
+          if (!m) { println(stripQuotes(rest)); break; }
+          const { parent, name } = fsParentAndName(fsResolveParts(cwd, m[3]));
+          if (!parent || parent.type !== 'dir') { println('echo: ' + m[3] + ': No such file or directory', 'boot-warn'); break; }
+          let f = parent.children[name];
+          if (!f || f.type !== 'file') f = parent.children[name] = { type: 'file', data: '' };
+          f.data = (m[2] === '>>' ? (f.data || '') : '') + stripQuotes(m[1]) + '\n';
+          break;
+        }
+
+        case 'tree': {
+          const parts = fsResolveParts(cwd, a[1] || '.');
+          const node = fsLookup(parts);
+          if (!node) { println('tree: ' + (a[1] || '.') + ': No such file or directory', 'boot-warn'); break; }
+          println(fsPartsToPath(parts) || '/', 'boot-info');
+          if (node.type === 'dir') (function walk(n, prefix) {
+            const names = Object.keys(n.children).sort();
+            names.forEach((nm, i) => {
+              const last = i === names.length - 1;
+              const child = n.children[nm];
+              println(prefix + (last ? '└── ' : '├── ') + nm + (child.type === 'dir' ? '/' : ''),
+                child.type === 'dir' ? 'boot-info' : '');
+              if (child.type === 'dir') walk(child, prefix + (last ? '    ' : '│   '));
+            });
+          })(node, '');
+          break;
+        }
         case 'basic': openBasic(); println('[wm] focused BASIC window'); break;
         case 'loadvm': openLoader(); println('[wm] opened Actor Loader'); break;
         case 'blender': case 'display': openDisplay(); println('[wm] opened 3D Display'); break;
@@ -1221,7 +1469,7 @@
     'Rotate (回転)': '10 REM rotating line segment / 線分の回転\n20 LET A=0\n30 CLS\n40 COLOR 5\n50 CIRCLE 120,90,72\n60 LET X=120+70*COS(A)\n70 LET Y=90+70*SIN(A)\n80 COLOR 2\n90 LINE 120,90,X,Y\n100 PLOT X,Y\n110 PAUSE 30\n120 LET A=A+0.18\n130 GOTO 30',
   };
 
-  function openBasic() {
+  function openBasic(opts) {
     const node = document.createElement('div');
     node.className = 'basic-wrap';
     node.innerHTML =
@@ -1240,7 +1488,10 @@
       '<div class="basic-output"></div>' +
       '</div></div>';
 
-    const { body } = makeWindow({ title: 'BASIC', x: 120, y: 150, w: 560, h: 330, node, onClose: () => { try { basic.stop(); } catch (_e) {} } });
+    const { body } = makeWindow({ title: 'BASIC',
+      x: (opts && opts.x != null) ? opts.x : 120,
+      y: (opts && opts.y != null) ? opts.y : 150,
+      w: 560, h: 330, node, onClose: () => { try { basic.stop(); } catch (_e) {} } });
     const code = node.querySelector('.basic-code');
     const outEl = node.querySelector('.basic-output');
     const canvas = node.querySelector('#basic-canvas');
