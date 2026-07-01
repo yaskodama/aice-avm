@@ -22,6 +22,33 @@
         'shell: xsh ready',
       ],
     });
+    // Deep-link: opening the desktop at #<window> raises that window to the
+    // front after boot (e.g. /#vmg → VM Graphics). Lets an external caller
+    // focus a window by navigating the URL, without needing DOM access.
+    focusWindowFromHash();
+    window.addEventListener('hashchange', focusWindowFromHash);
+  }
+
+  // Map a URL hash to a window title and raise it (un-minimise + top z-index).
+  function focusWindowFromHash() {
+    const key = (location.hash || '').replace('#', '').toLowerCase();
+    if (!key) return;
+    const titles = { vmg: 'VM Graphics', graphics: 'VM Graphics', finder: 'avm Finder',
+      avm: 'avm Finder', display: '3D Display', basic: 'BASIC', console: 'Xinu Console' };
+    const want = titles[key];
+    if (!want) return;
+    setTimeout(() => {
+      const rec = windows.find((w) => {
+        const t = w.win.querySelector('.t');
+        return t && t.textContent.indexOf(want) >= 0;
+      });
+      if (rec) {
+        rec.win.style.display = ''; rec.minimized = false;
+        rec.win.style.zIndex = ++zTop;
+        windows.forEach((w) => { w.win.classList.remove('active'); w.task.classList.remove('active'); });
+        rec.win.classList.add('active'); rec.task.classList.add('active');
+      }
+    }, 500);
   }
 
   function startClock() {
