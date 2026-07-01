@@ -120,7 +120,6 @@
 
   // ---- desktop boot ----------------------------------------------------
   function startDesktop(info) {
-    openConsole(info);
     openProcesses();
     openVmGraphics();
     openDisplay();
@@ -131,6 +130,9 @@
     openPiScreen({ title: 'rpi4 Screen (HDMI)', host: '192.168.3.100', x: 360, y: 300 });
     openPiScreen({ title: 'rpi3 Screen (HDMI)', host: '192.168.3.50:8080',  x: 30,  y: 330, res: 96, ival: 10000 });
     openMeshControl();
+    // Open the console last so it starts on top (highest z-index) and its shell
+    // prompt is visible and clickable rather than buried behind other windows.
+    openConsole(info);
   }
 
   // ---- Raspberry Pi remote screen mirror ------------------------------
@@ -1041,7 +1043,15 @@
     const node = document.createElement('div');
     node.innerHTML = '<div class="con-out"></div>';
     const out = node.querySelector('.con-out');
-    const { body } = makeWindow({ title: 'Xinu Console', x: 30, y: 24, w: 440, h: 260, node });
+    const { win, body } = makeWindow({ title: 'Xinu Console', x: 30, y: 24, w: 440, h: 260, node });
+    // The console may open behind other windows, and makeWindow only raises a
+    // window (z-index) on mousedown without focusing anything inside it — so a
+    // click on the console would leave the shell input unfocused/uncovered by a
+    // window on top. Raise-and-focus the shell input on any click here.
+    win.addEventListener('mousedown', () => {
+      const inp = out.querySelector('.con-input input');
+      if (inp) setTimeout(() => inp.focus(), 0);
+    });
 
     const bootLines = (info.bootLog || [
       'Xinu booting on arm-rpi3 (BCM2837, cortex-a53)...',
