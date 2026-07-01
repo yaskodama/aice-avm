@@ -144,6 +144,7 @@
     const items = [
       { label: '🖥  シェル (Shell)', act: () => openConsole(desktopInfo, { primary: false, title: 'xsh (shell)', x: px, y: py }) },
       { label: '📝  BASIC',          act: () => openBasic({ x: px, y: py }) },
+      { label: '🧊  avm Finder',     act: () => openAvmFinder({ x: px, y: py }) },
     ];
     items.forEach((it) => {
       const el = document.createElement('div');
@@ -1123,6 +1124,11 @@
       return node;
     }
     function mkfile(dirParts, name, data) { mkdir(dirParts).children[name] = { type: 'file', data }; }
+    // An .avm module carries an `avm` descriptor telling the avm Finder how to
+    // run/display it (kind:'mesh' → 3D Display, kind:'actor' → Actor Loader).
+    function mkavm(dirParts, name, avm, data) {
+      mkdir(dirParts).children[name] = { type: 'file', avm, data: data || '' };
+    }
     mkfile(['home', 'xinu'], 'readme.txt',
       'Welcome to the Xinu/AIPL host VM (aice-avm).\n' +
       'This is an in-memory hierarchical filesystem.\n' +
@@ -1134,6 +1140,10 @@
     mkfile(['etc'], 'version', 'aice-avm host VM\nbrowser desktop simulator\n');
     mkfile(['actors'], 'PingPong.abcl',
       'class Main {\n  method tick() { send new Ping().go(3); }\n}\n');
+    // Sample .avm module: the MAKINA-7 3D mesh display.
+    mkavm(['home', 'xinu'], 'MAKINA-7.avm', { kind: 'mesh', mesh: 'MAKINA', title: 'MAKINA-7' },
+      'AVM module: MAKINA-7 (3D mesh turntable display)\n' +
+      'Double-click in avm Finder to run — opens the software 3D Display.\n');
     mkdir(['dev']);
     mkfile(['dev'], 'console', '(the live VM console — see the Xinu Console window)\n');
     mkdir(['tmp']);
@@ -1273,7 +1283,7 @@
       switch (c) {
         case 'help':
           println('files: ls pwd cd cat mkdir touch rm echo tree');
-          println('system: help ver ps clear date basic loadvm blender rpi3 rpi4 rpi5 mesh about');
+          println('system: help ver ps clear date basic avm loadvm blender rpi3 rpi4 rpi5 mesh about');
           break;
         case 'ver': println('Xinu (browser sim) — AIPL/AICE edition, build ' + (info.build || 'web')); break;
         case 'about': println('Embedded Xinu desktop simulator. Multi-window WM + BASIC.'); break;
@@ -1383,6 +1393,7 @@
           break;
         }
         case 'basic': openBasic(); println('[wm] focused BASIC window'); break;
+        case 'avm': case 'finder': openAvmFinder(); println('[wm] opened avm Finder'); break;
         case 'loadvm': openLoader(); println('[wm] opened Actor Loader'); break;
         case 'blender': case 'display': openDisplay(); println('[wm] opened 3D Display'); break;
         case 'graphics': case 'lines': openVmGraphics(); println('[wm] opened VM Graphics'); break;
@@ -1840,7 +1851,8 @@
     }
   }
 
-  function openDisplay() {
+  function openDisplay(opts) {
+    const startMesh = (opts && opts.mesh && MESHES[opts.mesh]) ? opts.mesh : 'MAKINA';
     const node = document.createElement('div');
     node.className = 'basic-wrap';
     node.innerHTML =
@@ -1853,13 +1865,17 @@
       '<div style="color:#8b949e;font-size:11px">drag to rotate · software 3D (actor-to-actor Blender display)</div>';
 
     let alive = true;
-    makeWindow({ title: '3D Display (Blender)', x: 700, y: 30, w: 330, h: 330, node, onClose: () => { alive = false; } });
+    const title = (opts && opts.title) ? opts.title + ' — 3D Display' : '3D Display (Blender)';
+    makeWindow({ title, x: (opts && opts.x != null) ? opts.x : 700, y: (opts && opts.y != null) ? opts.y : 30,
+      w: 330, h: 330, node, onClose: () => { alive = false; } });
     const canvas = node.querySelector('.d-canvas');
     const ctx = canvas.getContext('2d');
     let solid = true, spin = true, ay = 0.6, ax = -0.35;
-    let mesh = MESHES.MAKINA();
+    let mesh = MESHES[startMesh]();
 
-    node.querySelector('.d-mesh').addEventListener('change', (e) => { mesh = MESHES[e.target.value](); xlog('[3d] loaded mesh ' + mesh.name, 'boot-info'); });
+    const meshSel = node.querySelector('.d-mesh');
+    meshSel.value = startMesh;
+    meshSel.addEventListener('change', (e) => { mesh = MESHES[e.target.value](); xlog('[3d] loaded mesh ' + mesh.name, 'boot-info'); });
     const modeBtn = node.querySelector('[data-act=mode]');
     const spinBtn = node.querySelector('[data-act=spin]');
     modeBtn.addEventListener('click', () => { solid = !solid; modeBtn.textContent = solid ? 'Solid' : 'Wire'; });
@@ -1877,6 +1893,98 @@
       requestAnimationFrame(frame);
     })();
     xlog('[3d] Blender display started (' + mesh.name + ')', 'boot-ok');
+  }
+
+  // ---- avm Finder ------------------------------------------------------
+  // A file-manager window that scans the VFS for ".avm" modules and shows them
+  // as icons. Double-click (or select + Open) runs the module: a mesh module
+  // opens the 3D Display showing it; anything else is handed to the Actor Loader.
+  function runAvmFile(f) {
+    const d = f.node.avm;
+    xlog('[avm] launching ' + f.path + ' …', 'boot-info');
+    if (d && d.kind === 'mesh') {
+      openDisplay({ mesh: d.mesh || 'MAKINA', title: d.title || f.name.replace(/\.avm$/i, '') });
+      xlog('[avm] ' + (d.title || f.name) + ' → 3D Display', 'boot-ok');
+    } else {
+      openLoader();
+      xlog('[avm] ' + f.name + ' → Actor Loader (no display descriptor)', 'boot-info');
+    }
+  }
+
+  function openAvmFinder(opts) {
+    const node = document.createElement('div');
+    node.className = 'basic-wrap';
+    node.innerHTML =
+      '<div class="basic-toolbar">' +
+      '<button data-act="refresh">⟳ Refresh</button>' +
+      '<button data-act="run">▶ Open</button>' +
+      '<span style="color:#8b949e" class="avf-info"></span>' +
+      '</div>' +
+      '<div class="avf-grid" style="flex:1;overflow:auto;display:flex;flex-wrap:wrap;align-content:flex-start;' +
+      'gap:8px;padding:8px;background:#0b1220;border:1px solid #2b3650;border-radius:8px"></div>' +
+      '<div style="color:#8b949e;font-size:11px">double-click an .avm to run &amp; display it</div>';
+    makeWindow({ title: 'avm Finder',
+      x: (opts && opts.x != null) ? opts.x : 180, y: (opts && opts.y != null) ? opts.y : 90,
+      w: 460, h: 300, node });
+    const grid = node.querySelector('.avf-grid');
+    const info = node.querySelector('.avf-info');
+    let selected = null;
+
+    // Recursively collect every *.avm file in the shared VFS.
+    function collect() {
+      const out = [];
+      (function walk(n, path) {
+        if (n.type !== 'dir') return;
+        Object.keys(n.children).sort().forEach((nm) => {
+          const child = n.children[nm];
+          const p = (path === '/' ? '' : path) + '/' + nm;
+          if (child.type === 'dir') walk(child, p);
+          else if (nm.toLowerCase().endsWith('.avm')) out.push({ path: p, name: nm, node: child });
+        });
+      })(fsRoot, '/');
+      return out;
+    }
+
+    function render() {
+      const files = collect();
+      grid.innerHTML = '';
+      selected = null;
+      info.textContent = ' — ' + files.length + ' .avm file' + (files.length === 1 ? '' : 's');
+      if (!files.length) {
+        grid.innerHTML = '<div style="color:#566;padding:12px">no .avm files found in the filesystem</div>';
+        return;
+      }
+      files.forEach((f) => {
+        const isMesh = f.node.avm && f.node.avm.kind === 'mesh';
+        const el = document.createElement('div');
+        el.className = 'avf-item';
+        el.title = f.path;
+        el.style.cssText = 'width:88px;text-align:center;cursor:pointer;border-radius:8px;padding:8px 4px';
+        el.innerHTML =
+          '<div style="font-size:34px;line-height:1">' + (isMesh ? '🧊' : '📦') + '</div>' +
+          '<div style="font-size:11px;color:#d8dee9;word-break:break-all;margin-top:3px">' + escapeHtml(f.name) + '</div>' +
+          '<div style="font-size:9px;color:#566;word-break:break-all">' + escapeHtml(f.path) + '</div>';
+        el.addEventListener('click', () => {
+          selected = f;
+          grid.querySelectorAll('.avf-item').forEach((x) => { x.style.background = ''; });
+          el.style.background = '#1b2942';
+        });
+        el.addEventListener('dblclick', () => runAvmFile(f));
+        grid.appendChild(el);
+      });
+    }
+
+    node.querySelector('.basic-toolbar').addEventListener('click', (e) => {
+      const act = e.target.getAttribute('data-act');
+      if (act === 'refresh') render();
+      else if (act === 'run') {
+        if (selected) runAvmFile(selected);
+        else info.textContent = ' — select a file first, then Open (or double-click it)';
+      }
+    });
+
+    render();
+    xlog('[wm] avm Finder opened (' + collect().length + ' .avm files)', 'boot-ok');
   }
 
   // ---- Tiny BASIC interpreter (graphics-capable) -----------------------
