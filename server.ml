@@ -426,6 +426,76 @@ let str_param path name =
     Buffer.contents b
   end
 
+(* URL-decode a query value (%2F -> '/', '+' -> ' '). *)
+let url_decode s =
+  let n = String.length s in
+  let b = Buffer.create n in
+  let i = ref 0 in
+  while !i < n do
+    (match s.[!i] with
+     | '%' when !i + 2 < n ->
+        (try Buffer.add_char b (Char.chr (int_of_string ("0x" ^ String.sub s (!i + 1) 2)));
+             i := !i + 3
+         with _ -> Buffer.add_char b '%'; incr i)
+     | '+' -> Buffer.add_char b ' '; incr i
+     | c -> Buffer.add_char b c; incr i)
+  done;
+  Buffer.contents b
+
+(* ---- real host filesystem, exposed to the desktop shell as /computer ----
+   The browser VFS is in-memory only; these two routes let `ls /computer`,
+   `cd`, and `cat` reach the actual machine's filesystem (read-only). *)
+let jstr s = "\"" ^ json_escape s ^ "\""
+
+let host_ls_json qpath =
+  let p = url_decode qpath in
+  let p = if p = "" then "/" else p in
+  try
+    let st = Unix.stat p in
+    (match st.Unix.st_kind with
+     | Unix.S_DIR ->
+        let names = try Sys.readdir p with _ -> [||] in
+        Array.sort compare names;
+        let b = Buffer.create 1024 in
+        Buffer.add_string b (Printf.sprintf "{\"path\":%s,\"type\":\"dir\",\"entries\":[" (jstr p));
+        Array.iteri (fun i name ->
+          if i > 0 then Buffer.add_char b ',';
+          let full = if p = "/" then "/" ^ name else p ^ "/" ^ name in
+          let kind, size =
+            (try let ls = Unix.lstat full in
+               ((match ls.Unix.st_kind with
+                 | Unix.S_DIR -> "dir" | Unix.S_LNK -> "link" | _ -> "file"),
+                ls.Unix.st_size)
+             with _ -> ("?", 0)) in
+          Buffer.add_string b (Printf.sprintf "{\"name\":%s,\"type\":%s,\"size\":%d}"
+            (jstr name) (jstr kind) size)) names;
+        Buffer.add_string b "]}";
+        Buffer.contents b
+     | _ -> Printf.sprintf "{\"path\":%s,\"type\":\"file\",\"size\":%d}" (jstr p) st.Unix.st_size)
+  with
+  | Unix.Unix_error (e, _, _) -> Printf.sprintf "{\"error\":%s}" (jstr (Unix.error_message e))
+  | Sys_error m -> Printf.sprintf "{\"error\":%s}" (jstr m)
+  | _ -> "{\"error\":\"cannot read\"}"
+
+let host_cat qpath =
+  let p = url_decode qpath in
+  try
+    (match (Unix.stat p).Unix.st_kind with
+     | Unix.S_DIR -> "cat: " ^ p ^ ": Is a directory"
+     | _ ->
+        let ic = open_in_bin p in
+        let n = in_channel_length ic in
+        let cap = 262144 in
+        let m = if n > cap then cap else n in
+        let s = really_input_string ic m in
+        close_in ic;
+        if n > cap then s ^ Printf.sprintf "\n[... truncated: %d of %d bytes shown ...]\n" cap n
+        else s)
+  with
+  | Unix.Unix_error (e, _, _) -> "cat: " ^ p ^ ": " ^ Unix.error_message e
+  | Sys_error m -> "cat: " ^ m
+  | _ -> "cat: cannot read " ^ p
+
 (* Outbound HTTP/1.0 GET to a board on the LAN; returns the response body (the
    browser can't reach the boards' non-CORS bench routes directly, so the
    desktop hits us same-origin and we proxy).  A read timeout guards a slow
@@ -627,6 +697,8 @@ let handle rt fd =
         ignore (Thread.create (fun () -> Thread.delay 0.3; do_restart ()) ());
         http_text "restarting aice-avm (fresh process on the same port)...\r\n"
       end
+      else if starts_with path "/api/host/ls" then http_json (host_ls_json (str_param path "path"))
+      else if starts_with path "/api/host/cat" then http_text (host_cat (str_param path "path"))
       else if starts_with path "/mesh/bench" then http_text (mesh_bench path)
       else if starts_with path "/mesh/loadvm" then http_text (mesh_loadvm path)
       else if starts_with path "/mesh/cmd" then http_text (mesh_cmd path)

@@ -221,10 +221,18 @@
     openBasic();
     openLoader();
     // Real Raspberry Pi Xinu boards mirrored as windows (HDMI over HTTP /fb).
-    openPiScreen({ title: 'rpi5 Screen (HDMI)', host: '192.168.3.101', x: 720, y: 300 });
-    openPiScreen({ title: 'rpi4 Screen (HDMI)', host: '192.168.3.100', x: 360, y: 300 });
-    openPiScreen({ title: 'rpi3 Screen (HDMI)', host: '192.168.3.50:8080',  x: 30,  y: 330, res: 96, ival: 10000 });
-    openMeshControl();
+    // The standalone aice-avm app (__XINU_AVM) has no Pi cluster on the LAN, so
+    // auto-opening these mirrors + the mesh monitor makes the browser hammer
+    // unreachable hosts (each connect stalls ~tens of seconds), which starves
+    // the network/main thread and makes the whole desktop — including the shell
+    // and `ls /computer` — feel very slow. Only auto-open them for the Pi-cluster
+    // deployment; they remain available from the desktop menu either way.
+    if (!window.__XINU_AVM) {
+      openPiScreen({ title: 'rpi5 Screen (HDMI)', host: '192.168.3.101', x: 720, y: 300 });
+      openPiScreen({ title: 'rpi4 Screen (HDMI)', host: '192.168.3.100', x: 360, y: 300 });
+      openPiScreen({ title: 'rpi3 Screen (HDMI)', host: '192.168.3.50:8080',  x: 30,  y: 330, res: 96, ival: 10000 });
+      openMeshControl();
+    }
     // Open the console last so it starts on top (highest z-index) and its shell
     // prompt is visible and clickable rather than buried behind other windows.
     openConsole(info);
@@ -1183,8 +1191,22 @@
     mkdir(['dev']);
     mkfile(['dev'], 'console', '(the live VM console — see the Xinu Console window)\n');
     mkdir(['tmp']);
+    // /computer is a mount onto the REAL host machine's filesystem (read-only),
+    // served by the receiver's /api/host/* routes. `ls /computer` lists the
+    // actual root directory of the machine running the host VM.
+    mkdir(['computer']).mount = 'host';
   }
   fsSeed();
+
+  // ---- real host filesystem, mounted at /computer (read-only) ----------
+  // Any resolved path whose first component is 'computer' is backed by the
+  // host machine, not the in-memory VFS. hostPathOf(['computer','Users']) -> '/Users'.
+  function isHostParts(parts) { return parts[0] === 'computer'; }
+  function hostPathOf(parts) { return '/' + parts.slice(1).join('/'); }
+  function hostLs(parts) {
+    return fetch('/api/host/ls?path=' + encodeURIComponent(hostPathOf(parts)))
+      .then((r) => r.json());
+  }
 
   // Resolve a path (absolute or relative to cwd) to an array of name parts,
   // collapsing '.' and '..'. cwd is an absolute path string like '/home/xinu'.
@@ -1307,8 +1329,9 @@
         if (e.key !== 'Enter') return;
         const cmd = input.value.trim();
         input.parentElement.innerHTML = '<span class="ps1">' + escapeHtml(ps1()) + '</span> ' + escapeHtml(cmd);
-        runCmd(cmd);
-        addPrompt();
+        // runCmd may return a promise for host-FS (/computer) commands; wait for
+        // it so its output prints above the next prompt.
+        Promise.resolve(runCmd(cmd)).catch(() => {}).then(addPrompt);
       });
     }
 
@@ -1319,6 +1342,7 @@
       switch (c) {
         case 'help':
           println('files: ls pwd cd cat mkdir touch rm echo tree');
+          println('host:  ls /computer  — browse the real machine filesystem (read-only)');
           println('system: help ver ps clear date basic avm loadvm blender rpi3 rpi4 rpi5 mesh about');
           break;
         case 'ver': println('Xinu (browser sim) — AIPL/AICE edition, build ' + (info.build || 'web')); break;
@@ -1336,7 +1360,16 @@
 
         case 'ls': {
           const targ = a[1] || '.';
-          const node = fsLookup(fsResolveParts(cwd, targ));
+          const parts = fsResolveParts(cwd, targ);
+          if (isHostParts(parts)) {
+            return hostLs(parts).then((d) => {
+              if (d.error) { println('ls: ' + targ + ': ' + d.error, 'boot-warn'); return; }
+              if (d.type === 'file') { println(targ); return; }
+              (d.entries || []).forEach((e) =>
+                println(e.type === 'dir' ? e.name + '/' : e.name, e.type === 'dir' ? 'boot-info' : ''));
+            }).catch(() => println('ls: ' + targ + ': host unreachable', 'boot-warn'));
+          }
+          const node = fsLookup(parts);
           if (!node) { println('ls: ' + targ + ': No such file or directory', 'boot-warn'); break; }
           if (node.type === 'file') { println(targ); break; }
           const names = Object.keys(node.children).sort();
@@ -1351,6 +1384,13 @@
         case 'cd': {
           const targ = a[1] || '/home/xinu';
           const parts = fsResolveParts(cwd, targ);
+          if (isHostParts(parts)) {
+            return hostLs(parts).then((d) => {
+              if (d.error) { println('cd: ' + targ + ': ' + d.error, 'boot-warn'); return; }
+              if (d.type !== 'dir') { println('cd: ' + targ + ': Not a directory', 'boot-warn'); return; }
+              cwd = fsPartsToPath(parts);
+            }).catch(() => println('cd: ' + targ + ': host unreachable', 'boot-warn'));
+          }
           const node = fsLookup(parts);
           if (!node) { println('cd: ' + targ + ': No such file or directory', 'boot-warn'); break; }
           if (node.type !== 'dir') { println('cd: ' + targ + ': Not a directory', 'boot-warn'); break; }
@@ -1360,7 +1400,14 @@
 
         case 'cat': {
           if (!a[1]) { println('usage: cat <file>'); break; }
-          const node = fsLookup(fsResolveParts(cwd, a[1]));
+          const parts = fsResolveParts(cwd, a[1]);
+          if (isHostParts(parts)) {
+            return fetch('/api/host/cat?path=' + encodeURIComponent(hostPathOf(parts)))
+              .then((r) => r.text())
+              .then((t) => { t.replace(/\n$/, '').split('\n').forEach((ln) => println(ln)); })
+              .catch(() => println('cat: ' + a[1] + ': host unreachable', 'boot-warn'));
+          }
+          const node = fsLookup(parts);
           if (!node) { println('cat: ' + a[1] + ': No such file or directory', 'boot-warn'); break; }
           if (node.type === 'dir') { println('cat: ' + a[1] + ': Is a directory', 'boot-warn'); break; }
           const text = node.data || '';
@@ -1370,6 +1417,7 @@
 
         case 'mkdir': {
           if (!a[1]) { println('usage: mkdir <dir>'); break; }
+          if (isHostParts(fsResolveParts(cwd, a[1]))) { println('mkdir: /computer is read-only', 'boot-warn'); break; }
           const { parent, name } = fsParentAndName(fsResolveParts(cwd, a[1]));
           if (!parent || parent.type !== 'dir') { println('mkdir: ' + a[1] + ': No such file or directory', 'boot-warn'); break; }
           if (parent.children[name]) { println('mkdir: ' + a[1] + ': File exists', 'boot-warn'); break; }
@@ -1379,6 +1427,7 @@
 
         case 'touch': {
           if (!a[1]) { println('usage: touch <file>'); break; }
+          if (isHostParts(fsResolveParts(cwd, a[1]))) { println('touch: /computer is read-only', 'boot-warn'); break; }
           const { parent, name } = fsParentAndName(fsResolveParts(cwd, a[1]));
           if (!parent || parent.type !== 'dir') { println('touch: ' + a[1] + ': No such file or directory', 'boot-warn'); break; }
           if (!parent.children[name]) parent.children[name] = { type: 'file', data: '' };
@@ -1390,6 +1439,7 @@
           if (a[1] === '-r' || a[1] === '-rf' || a[1] === '-R') { rec = true; targ = a[2]; }
           if (!targ) { println('usage: rm [-r] <path>'); break; }
           const parts = fsResolveParts(cwd, targ);
+          if (isHostParts(parts)) { println('rm: /computer is read-only', 'boot-warn'); break; }
           if (!parts.length) { println('rm: cannot remove /', 'boot-warn'); break; }
           const node = fsLookup(parts);
           if (!node) { println('rm: ' + targ + ': No such file or directory', 'boot-warn'); break; }
@@ -1403,6 +1453,7 @@
           const rest = cmd.slice(4).replace(/^\s+/, '');
           const m = rest.match(/^(.*?)\s*(>>|>)\s*(\S+)\s*$/);
           if (!m) { println(stripQuotes(rest)); break; }
+          if (isHostParts(fsResolveParts(cwd, m[3]))) { println('echo: /computer is read-only', 'boot-warn'); break; }
           const { parent, name } = fsParentAndName(fsResolveParts(cwd, m[3]));
           if (!parent || parent.type !== 'dir') { println('echo: ' + m[3] + ': No such file or directory', 'boot-warn'); break; }
           let f = parent.children[name];
@@ -1413,6 +1464,7 @@
 
         case 'tree': {
           const parts = fsResolveParts(cwd, a[1] || '.');
+          if (isHostParts(parts)) { println('tree: not supported under /computer — use ls', 'boot-warn'); break; }
           const node = fsLookup(parts);
           if (!node) { println('tree: ' + (a[1] || '.') + ': No such file or directory', 'boot-warn'); break; }
           println(fsPartsToPath(parts) || '/', 'boot-info');
