@@ -443,8 +443,9 @@ let url_decode s =
   Buffer.contents b
 
 (* ---- real host filesystem, exposed to the desktop shell as /computer ----
-   The browser VFS is in-memory only; these two routes let `ls /computer`,
-   `cd`, and `cat` reach the actual machine's filesystem (read-only). *)
+   The browser VFS is in-memory only; these routes let `ls /computer`,
+   `cd`, `cat`, and the write commands (cp, echo>, touch, mkdir, rm) reach the
+   actual machine's filesystem (read-write). *)
 let jstr s = "\"" ^ json_escape s ^ "\""
 
 let host_ls_json qpath =
@@ -495,6 +496,120 @@ let host_cat qpath =
   | Unix.Unix_error (e, _, _) -> "cat: " ^ p ^ ": " ^ Unix.error_message e
   | Sys_error m -> "cat: " ^ m
   | _ -> "cat: cannot read " ^ p
+
+(* ---- host filesystem writes (make /computer read-write) ----------------
+   write/mkdir/rm/cp on the real machine, backing the desktop shell's cp,
+   echo>, touch, mkdir and rm under /computer. *)
+let host_write qpath (body : string) =
+  let p = url_decode qpath in
+  try
+    (match (try Some (Unix.stat p).Unix.st_kind with _ -> None) with
+     | Some Unix.S_DIR -> Printf.sprintf "{\"error\":%s}" (jstr (p ^ ": Is a directory"))
+     | _ ->
+        let oc = open_out_bin p in
+        output_string oc body; close_out oc;
+        Printf.sprintf "{\"ok\":true,\"path\":%s,\"bytes\":%d}" (jstr p) (String.length body))
+  with
+  | Unix.Unix_error (e, _, _) -> Printf.sprintf "{\"error\":%s}" (jstr (Unix.error_message e))
+  | Sys_error m -> Printf.sprintf "{\"error\":%s}" (jstr m)
+  | _ -> Printf.sprintf "{\"error\":%s}" (jstr "cannot write")
+
+let host_mkdir qpath =
+  let p = url_decode qpath in
+  try Unix.mkdir p 0o755; Printf.sprintf "{\"ok\":true,\"path\":%s}" (jstr p)
+  with
+  | Unix.Unix_error (e, _, _) -> Printf.sprintf "{\"error\":%s}" (jstr (Unix.error_message e))
+  | _ -> Printf.sprintf "{\"error\":%s}" (jstr "cannot mkdir")
+
+let rec rm_rf p =
+  match (Unix.lstat p).Unix.st_kind with
+  | Unix.S_DIR ->
+     Array.iter (fun n -> rm_rf (Filename.concat p n)) (Sys.readdir p);
+     Unix.rmdir p
+  | _ -> Unix.unlink p
+
+let host_rm qpath recursive =
+  let p = url_decode qpath in
+  try
+    (match (Unix.lstat p).Unix.st_kind with
+     | Unix.S_DIR when not recursive ->
+        Printf.sprintf "{\"error\":%s}" (jstr (p ^ ": is a directory (use -r)"))
+     | Unix.S_DIR -> rm_rf p; Printf.sprintf "{\"ok\":true,\"path\":%s}" (jstr p)
+     | _ -> Unix.unlink p; Printf.sprintf "{\"ok\":true,\"path\":%s}" (jstr p))
+  with
+  | Unix.Unix_error (e, _, _) -> Printf.sprintf "{\"error\":%s}" (jstr (Unix.error_message e))
+  | _ -> Printf.sprintf "{\"error\":%s}" (jstr "cannot remove")
+
+let copy_file src dst =
+  let ic = open_in_bin src in
+  let n = in_channel_length ic in
+  let data = really_input_string ic n in
+  close_in ic;
+  let oc = open_out_bin dst in
+  output_string oc data; close_out oc
+
+let rec cp_r src dst =
+  match (Unix.stat src).Unix.st_kind with
+  | Unix.S_DIR ->
+     (try Unix.mkdir dst 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+     Array.iter (fun n -> cp_r (Filename.concat src n) (Filename.concat dst n)) (Sys.readdir src)
+  | _ -> copy_file src dst
+
+let host_cp qsrc qdst recursive =
+  let src = url_decode qsrc and dst0 = url_decode qdst in
+  try
+    let src_kind = (Unix.stat src).Unix.st_kind in
+    (* if dst is an existing directory, copy into it under src's basename *)
+    let dst =
+      match (try Some (Unix.stat dst0).Unix.st_kind with _ -> None) with
+      | Some Unix.S_DIR -> Filename.concat dst0 (Filename.basename src)
+      | _ -> dst0 in
+    (match src_kind with
+     | Unix.S_DIR when not recursive ->
+        Printf.sprintf "{\"error\":%s}" (jstr (src ^ ": is a directory (use -r)"))
+     | Unix.S_DIR -> cp_r src dst; Printf.sprintf "{\"ok\":true,\"path\":%s}" (jstr dst)
+     | _ -> copy_file src dst; Printf.sprintf "{\"ok\":true,\"path\":%s}" (jstr dst))
+  with
+  | Unix.Unix_error (e, _, _) -> Printf.sprintf "{\"error\":%s}" (jstr (Unix.error_message e))
+  | Sys_error m -> Printf.sprintf "{\"error\":%s}" (jstr m)
+  | _ -> Printf.sprintf "{\"error\":%s}" (jstr "cannot copy")
+
+(* ---- AVM inbox: modules received from other machines --------------------
+   Every .avm pushed to this receiver (POST /actor/loadvm — the `send` tool, a
+   Pi board, or another aice-avm) is recorded here with its origin, so the
+   desktop's "AVM 受信箱" window can list them and re-run / disassemble / save
+   each one.  This is the unified reception point surfaced in the UI. *)
+type inbox_entry = {
+  iid : int; iname : string; ifrom : string;
+  isize : int; its : float; ibytes : bytes; mutable iran : bool;
+}
+let ilock = Mutex.create ()
+let inbox : inbox_entry list ref = ref []      (* newest first *)
+let inext = ref 0
+let inbox_add name from bytes ran =
+  Mutex.lock ilock;
+  let id = !inext in incr inext;
+  let e = { iid = id; iname = name; ifrom = from;
+            isize = Bytes.length bytes; its = Unix.gettimeofday ();
+            ibytes = bytes; iran = ran } in
+  inbox := e :: !inbox;
+  (let n = List.length !inbox in                (* bound memory to last 100 *)
+   if n > 100 then inbox := List.filteri (fun i _ -> i < 100) !inbox);
+  Mutex.unlock ilock;
+  id
+let inbox_find id =
+  Mutex.lock ilock; let r = List.find_opt (fun e -> e.iid = id) !inbox in Mutex.unlock ilock; r
+let inbox_json () =
+  Mutex.lock ilock; let es = !inbox in Mutex.unlock ilock;
+  let b = Buffer.create 512 in
+  Buffer.add_char b '[';
+  List.iteri (fun i e ->
+    if i > 0 then Buffer.add_char b ',';
+    Buffer.add_string b
+      (Printf.sprintf "{\"id\":%d,\"name\":%s,\"from\":%s,\"size\":%d,\"ts\":%.0f,\"ran\":%s}"
+         e.iid (jstr e.iname) (jstr e.ifrom) e.isize e.its (if e.iran then "true" else "false"))) es;
+  Buffer.add_char b ']';
+  Buffer.contents b
 
 (* Outbound HTTP/1.0 GET to a board on the LAN; returns the response body (the
    browser can't reach the boards' non-CORS bench routes directly, so the
@@ -665,14 +780,23 @@ let handle rt fd =
                    | Some i -> String.sub headers 0 i | None -> headers) in
     let path = (match String.split_on_char ' ' reqline with _ :: p :: _ -> p | _ -> "/") in
     let meth = (match String.split_on_char ' ' reqline with m :: _ -> m | _ -> "GET") in
+    (* origin of this connection, recorded with any received .avm module *)
+    let peer = (try match Unix.getpeername fd with
+                    | Unix.ADDR_INET (a, _) -> Unix.string_of_inet_addr a
+                    | _ -> "local"
+                with _ -> "?") in
     let resp =
       if meth = "OPTIONS" then http_preflight  (* CORS preflight *)
       else if starts_with path "/actor/loadvm" then begin
         let skip = find_sub path "ask=0" >= 0 || find_sub path "noask" >= 0 in
         let accepted = if skip || not !ask_default then true else ask_console (String.length body) in
         let id = if accepted then Avm.loadrun rt (Bytes.of_string body) else -1 in
-        http_text (Printf.sprintf "loadvm: body=%d accepted=%d spawned actor id=%d\r\n"
-                     (String.length body) (if accepted then 1 else 0) id)
+        (* record every received module in the inbox (surfaced in the desktop) *)
+        let nm = let n = str_param path "name" in
+                 if n = "" then "incoming.avm" else url_decode n in
+        let iid = inbox_add nm peer (Bytes.of_string body) accepted in
+        http_text (Printf.sprintf "loadvm: body=%d accepted=%d spawned actor id=%d inbox=%d\r\n"
+                     (String.length body) (if accepted then 1 else 0) id iid)
       end
       else if starts_with path "/actor/loadsrc" then begin
         (* Browser sends .abcl source; compile here and run on the host VM. *)
@@ -699,6 +823,68 @@ let handle rt fd =
       end
       else if starts_with path "/api/host/ls" then http_json (host_ls_json (str_param path "path"))
       else if starts_with path "/api/host/cat" then http_text (host_cat (str_param path "path"))
+      else if starts_with path "/api/host/write" then http_json (host_write (str_param path "path") body)
+      else if starts_with path "/api/host/mkdir" then http_json (host_mkdir (str_param path "path"))
+      else if starts_with path "/api/host/rm" then http_json (host_rm (str_param path "path") (find_sub path "r=1" >= 0))
+      else if starts_with path "/api/host/cp" then http_json (host_cp (str_param path "src") (str_param path "dst") (find_sub path "r=1" >= 0))
+      else if starts_with path "/api/host/runvm" then begin
+        (* Read a .avm file straight off the real machine and run it on the host
+           VM — backs the "run an avm file from the Mac" page. *)
+        let p = url_decode (str_param path "path") in
+        (match read_file_opt p with
+         | None -> http_json (Printf.sprintf "{\"error\":%s}" (jstr (p ^ ": cannot read")))
+         | Some data ->
+            (try
+               let id = Avm.loadrun rt (Bytes.of_string data) in
+               if id < 0 then
+                 http_json (Printf.sprintf
+                   "{\"error\":%s}"
+                   (jstr (p ^ ": not a runnable AVM actor module (bad/failed to load)")))
+               else
+                 http_json (Printf.sprintf "{\"ok\":true,\"path\":%s,\"bytes\":%d,\"id\":%d}"
+                              (jstr p) (String.length data) id)
+             with e -> http_json (Printf.sprintf "{\"error\":%s}" (jstr (Printexc.to_string e)))))
+      end
+      else if starts_with path "/api/host/disasm" then begin
+        (* Recover a readable bytecode listing from a .avm file on the machine. *)
+        let p = url_decode (str_param path "path") in
+        (match read_file_opt p with
+         | None -> http_text ("disasm: " ^ p ^ ": cannot read")
+         | Some data ->
+            (try http_text (Avm.disassemble (Bytes.of_string data))
+             with e -> http_text ("disasm: not a valid .avm module (" ^ Printexc.to_string e ^ ")")))
+      end
+      else if starts_with path "/api/cls" then begin
+        Mutex.lock glock; glines := []; gtris := []; Mutex.unlock glock;
+        http_json "{\"ok\":true}"
+      end
+      (* ---- AVM inbox (received-from-other-machines) API ---- *)
+      else if starts_with path "/api/inbox/run" then begin
+        let id = int_param path "id" in
+        (match inbox_find id with
+         | None -> http_json "{\"error\":\"no such inbox item\"}"
+         | Some e -> e.iran <- true;
+             let aid = Avm.loadrun rt e.ibytes in
+             http_json (Printf.sprintf "{\"ok\":true,\"id\":%d,\"actor\":%d}" id aid))
+      end
+      else if starts_with path "/api/inbox/disasm" then begin
+        let id = int_param path "id" in
+        (match inbox_find id with
+         | None -> http_text "disasm: no such inbox item"
+         | Some e -> (try http_text (Avm.disassemble e.ibytes)
+                      with ex -> http_text ("disasm: " ^ Printexc.to_string ex)))
+      end
+      else if starts_with path "/api/inbox/save" then begin
+        let id = int_param path "id" in
+        let p = url_decode (str_param path "path") in
+        (match inbox_find id with
+         | None -> http_json "{\"error\":\"no such inbox item\"}"
+         | Some e -> (try
+              let oc = open_out_bin p in output_bytes oc e.ibytes; close_out oc;
+              http_json (Printf.sprintf "{\"ok\":true,\"path\":%s,\"bytes\":%d}" (jstr p) e.isize)
+            with ex -> http_json (Printf.sprintf "{\"error\":%s}" (jstr (Printexc.to_string ex)))))
+      end
+      else if starts_with path "/api/inbox" then http_json (inbox_json ())
       else if starts_with path "/mesh/bench" then http_text (mesh_bench path)
       else if starts_with path "/mesh/loadvm" then http_text (mesh_loadvm path)
       else if starts_with path "/mesh/cmd" then http_text (mesh_cmd path)

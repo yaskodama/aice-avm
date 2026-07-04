@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="ja"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aice-avm — run an .avm file</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: #0b0f12; color: #cdd9e0;
+    font: 14px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 10px 16px; border-bottom: 1px solid #1d2a30;
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .sub { color: #6b8290; font-size: 12px; }
+  main { flex: 1; display: flex; min-height: 0; }
+  /* ---- file browser ---- */
+  #browser {
+    width: 340px; min-width: 260px; border-right: 1px solid #1d2a30;
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .pathbar { display: flex; gap: 6px; padding: 8px; border-bottom: 1px solid #1d2a30; }
+  .pathbar input {
+    flex: 1; min-width: 0; background: #06100a; color: #cde;
+    border: 1px solid #2a3a30; border-radius: 5px; padding: 6px 8px; font: inherit;
+  }
+  button {
+    background: #16323f; color: #bfe; border: 1px solid #24505f;
+    border-radius: 5px; padding: 6px 10px; font: inherit; cursor: pointer;
+  }
+  button:hover { background: #1d4657; }
+  button:active { background: #123340; }
+  button.primary { background: #1c5b3a; border-color: #2b8a58; color: #d6ffe6; }
+  button.primary:hover { background: #24734a; }
+  #list { flex: 1; overflow: auto; padding: 4px 0; }
+  .row {
+    display: flex; justify-content: space-between; gap: 8px;
+    padding: 4px 12px; cursor: pointer; white-space: nowrap;
+  }
+  .row:hover { background: #12222a; }
+  .row .nm { overflow: hidden; text-overflow: ellipsis; }
+  .row.dir .nm { color: #7fc8f0; }
+  .row.avm .nm { color: #7fe6a0; font-weight: 600; }
+  .row .sz { color: #5a707c; font-size: 12px; }
+  /* ---- stage ---- */
+  #stage { flex: 1; display: flex; flex-direction: column; min-width: 0; padding: 12px; gap: 10px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .toolbar .cur { color: #7fe6a0; font-family: ui-monospace, monospace; font-size: 12px; }
+  #wrap { flex: 1; display: flex; gap: 12px; min-height: 0; }
+  #canvas {
+    background: #06100a; border: 1px solid #2a3a30; border-radius: 6px;
+    max-width: 100%; max-height: 100%;
+  }
+  #console {
+    width: 320px; min-width: 200px; overflow: auto;
+    background: #05090c; border: 1px solid #1d2a30; border-radius: 6px;
+    padding: 8px 10px; font: 12px/1.5 ui-monospace, SFMono-Regular, monospace; color: #9fc8a8;
+  }
+  #console .warn { color: #f0a0a0; }
+  #status { font-size: 12px; color: #6b8290; }
+  .hint { font-size: 11px; color: #4c6472; }
+  #canvas { cursor: grab; }
+  #canvas.grabbing { cursor: grabbing; }
+  /* ---- source overlay ---- */
+  #srcOverlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6);
+    z-index: 50; align-items: center; justify-content: center; padding: 24px;
+  }
+  #srcOverlay.on { display: flex; }
+  .src-box {
+    width: min(920px, 96vw); height: min(80vh, 900px); display: flex; flex-direction: column;
+    background: #0c1418; border: 1px solid #24505f; border-radius: 8px; overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,.6);
+  }
+  .src-head {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    border-bottom: 1px solid #1d2a30; color: #bfe; font-size: 13px;
+  }
+  #srcBody {
+    margin: 0; flex: 1; overflow: auto; padding: 10px 14px; white-space: pre;
+    font: 12px/1.45 ui-monospace, SFMono-Regular, monospace; color: #b8d4c0;
+  }
+  @media (max-width: 760px) {
+    main { flex-direction: column; }
+    #browser { width: auto; border-right: none; border-bottom: 1px solid #1d2a30; max-height: 40vh; }
+    #wrap { flex-direction: column; } #console { width: auto; height: 160px; }
+  }
+</style></head>
+<body>
+<header>
+  <h1>aice-avm &nbsp;·&nbsp; run an .avm file</h1>
+  <span class="sub">Mac のファイルシステムから .avm を選んで実行・表示</span>
+</header>
+<main>
+  <section id="browser">
+    <div class="pathbar">
+      <button id="up" title="親ディレクトリへ">↑</button>
+      <input id="path" spellcheck="false" placeholder="/Users/you/... のパス、または .avm ファイル">
+      <button id="go">開く</button>
+    </div>
+    <div id="list"></div>
+  </section>
+
+  <section id="stage">
+    <div class="toolbar">
+      <button id="run" class="primary">▶ 実行</button>
+      <button id="source">&lt;/&gt; ソース復元</button>
+      <button id="clear">キャンバスをクリア</button>
+      <button id="resetview" title="回転・拡大をリセット">視点リセット</button>
+      <button id="restart">VM 再起動</button>
+      <span class="cur" id="cur"></span>
+    </div>
+    <div id="wrap">
+      <canvas id="canvas" width="820" height="640" title="ドラッグで回転 / ホイールで拡大縮小 / ダブルクリックでリセット"></canvas>
+      <div id="console"></div>
+    </div>
+    <div id="status">connecting…</div>
+    <div class="hint">キャンバス: ドラッグで回転・ホイールで拡大縮小・ダブルクリックでリセット</div>
+  </section>
+</main>
+
+<div id="srcOverlay">
+  <div class="src-box">
+    <div class="src-head">
+      <span id="srcTitle">逆アセンブル結果</span>
+      <span style="flex:1"></span>
+      <button id="srcCopy">コピー</button>
+      <button id="srcClose">閉じる</button>
+    </div>
+    <pre id="srcBody"></pre>
+  </div>
+</div>
+
+<script>
+// 16-colour VM palette (matches the kernel op_line/op_tri colour index).
+var COL = ['#000000','#3060ff','#30d040','#30d0d0','#e03030','#e040e0','#e0e040','#f0f0f0',
+           '#808080','#80a0ff','#80ff80','#80ffff','#ff8080','#ff80ff','#ffff80','#ffffff'];
+// An actor colour is either a direct 24-bit RGB (bit24 set → 0x01RRGGBB, used by
+// the MAKINA-7 mesh) or a 16-colour palette index. Same rule as the desktop VM
+// Graphics window, so meshes render in full colour here too.
+function avmColor(c) {
+  if (c & 0x1000000) return 'rgb(' + ((c >> 16) & 0xff) + ',' + ((c >> 8) & 0xff) + ',' + (c & 0xff) + ')';
+  return COL[c & 15] || '#ffffff';
+}
+
+var $ = function (id) { return document.getElementById(id); };
+var pathInput = $('path'), listEl = $('list'), curEl = $('cur'), statusEl = $('status');
+var cv = $('canvas'), ctx = cv.getContext('2d');
+var conEl = $('console');
+
+var curDir = '/';          // directory currently listed in the browser
+var selected = '';         // full host path of the .avm to run
+var conCursor = 0;         // /api/console incremental cursor
+
+// ---- file browser -------------------------------------------------------
+function isAvm(name) { return /\.avm$/i.test(name); }
+
+function listDir(dir) {
+  fetch('/api/host/ls?path=' + encodeURIComponent(dir))
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d.error) { listEl.innerHTML = '<div class="row"><span class="nm warn" style="color:#f0a0a0">' +
+        esc(d.error) + '</span></div>'; return; }
+      if (d.type === 'file') {           // a file path was opened directly
+        if (isAvm(d.path)) selectFile(d.path);
+        return;
+      }
+      curDir = d.path; pathInput.value = curDir;
+      var html = '';
+      (d.entries || []).forEach(function (e) {
+        var cls = e.type === 'dir' ? 'dir' : (isAvm(e.name) ? 'avm' : '');
+        var label = e.name + (e.type === 'dir' ? '/' : '');
+        var sz = e.type === 'dir' ? '' : human(e.size);
+        html += '<div class="row ' + cls + '" data-name="' + esc(e.name) + '" data-type="' + e.type + '">' +
+                '<span class="nm">' + esc(label) + '</span><span class="sz">' + sz + '</span></div>';
+      });
+      listEl.innerHTML = html || '<div class="row"><span class="sz">（空）</span></div>';
+    })
+    .catch(function () { statusEl.textContent = 'host unreachable'; });
+}
+
+function join(dir, name) { return dir === '/' ? '/' + name : dir + '/' + name; }
+function parentOf(dir) {
+  if (dir === '/' || dir === '') return '/';
+  var i = dir.replace(/\/+$/, '').lastIndexOf('/');
+  return i <= 0 ? '/' : dir.slice(0, i);
+}
+function human(n) {
+  if (n == null) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' K';
+  return (n / 1048576).toFixed(1) + ' M';
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, function (c) {
+  return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+function selectFile(fullpath) {
+  selected = fullpath;
+  curEl.textContent = '● ' + fullpath;
+}
+
+listEl.addEventListener('click', function (e) {
+  var row = e.target.closest('.row'); if (!row || !row.dataset.name) return;
+  var full = join(curDir, row.dataset.name);
+  if (row.dataset.type === 'dir') { listDir(full); }
+  else if (isAvm(row.dataset.name)) { selectFile(full); }
+});
+listEl.addEventListener('dblclick', function (e) {
+  var row = e.target.closest('.row'); if (!row || !row.dataset.name) return;
+  if (row.dataset.type !== 'dir' && isAvm(row.dataset.name)) { selectFile(join(curDir, row.dataset.name)); run(); }
+});
+$('up').addEventListener('click', function () { listDir(parentOf(curDir)); });
+$('go').addEventListener('click', openPath);
+pathInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') openPath(); });
+
+function openPath() {
+  var p = pathInput.value.trim(); if (!p) return;
+  // If it points at a .avm, select (and the ls callback runs it via selectFile path).
+  listDir(p);
+}
+
+// ---- run ----------------------------------------------------------------
+function run() {
+  var p = selected || pathInput.value.trim();
+  if (!p) { statusEl.textContent = '先に .avm ファイルを選んでください'; return; }
+  if (!isAvm(p)) { statusEl.textContent = p + ' は .avm ではありません'; return; }
+  statusEl.textContent = 'loading ' + p + ' …';
+  // clear the canvas first so the previous drawing does not linger
+  fetch('/api/cls').catch(function () {})
+    .then(function () {
+      return fetch('/api/host/runvm?path=' + encodeURIComponent(p));
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d.error) { statusEl.textContent = '実行エラー: ' + d.error; con('run: ' + d.error, true); return; }
+      selectFile(p);
+      statusEl.textContent = '実行中 — actor id=' + d.id + '  (' + human(d.bytes) + ')';
+      con('▶ ran ' + p + ' → actor id=' + d.id + ' (' + d.bytes + ' bytes)');
+    })
+    .catch(function () { statusEl.textContent = 'host unreachable'; });
+}
+$('run').addEventListener('click', run);
+$('clear').addEventListener('click', function () {
+  fetch('/api/cls').then(function () { ctx.clearRect(0, 0, cv.width, cv.height); });
+});
+$('restart').addEventListener('click', function () {
+  if (!confirm('VM を再起動しますか？ 実行中のアクターは全て停止します。')) return;
+  statusEl.textContent = 'restarting VM…';
+  fetch('/api/restart').then(function () {
+    setTimeout(function () { conCursor = 0; conEl.innerHTML = ''; statusEl.textContent = 'VM restarted'; }, 800);
+  });
+});
+
+// ---- console (VM print output) ------------------------------------------
+function con(text, warn) {
+  var div = document.createElement('div');
+  if (warn) div.className = 'warn';
+  div.textContent = text;
+  conEl.appendChild(div);
+  conEl.scrollTop = conEl.scrollHeight;
+}
+setInterval(function () {
+  fetch('/api/console?since=' + conCursor).then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d && d.lines) { d.lines.forEach(function (ln) { con(ln); }); conCursor = d.total; }
+    }).catch(function () {});
+}, 700);
+
+// ---- VM graphics poll + render ------------------------------------------
+// The VM streams already-projected 2D triangles, so the interactive view is a
+// rotate / zoom / pan transform of that rendered mesh around the canvas centre:
+// horizontal drag = spin (yaw), vertical drag = tilt (in-plane), wheel = zoom.
+var view = { rot: 0, tilt: 0, scale: 1, tx: 0, ty: 0 };
+var lastData = { w: 820, h: 640, lines: [], tris: [] };
+
+function drawScene() {
+  var d = lastData, W = cv.width, H = cv.height;
+  var sx = W / (d.w || W), sy = H / (d.h || H);
+  var cx = W / 2, cy = H / 2;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#06100a'; ctx.fillRect(0, 0, W, H);
+  // apply the interactive view transform about the canvas centre
+  ctx.translate(cx + view.tx, cy + view.ty);
+  ctx.rotate(view.rot);
+  ctx.scale(view.scale, view.scale * (1 - 0.6 * Math.sin(view.tilt)));
+  ctx.translate(-cx, -cy);
+  // triangles first (painter's order, back-to-front as emitted)
+  var tris = d.tris || [];
+  for (var i = 0; i < tris.length; i++) {
+    var t = tris[i];
+    ctx.fillStyle = avmColor(t[6]);
+    ctx.beginPath();
+    ctx.moveTo(t[0] * sx, t[1] * sy); ctx.lineTo(t[2] * sx, t[3] * sy); ctx.lineTo(t[4] * sx, t[5] * sy);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.lineWidth = 2 / view.scale; ctx.lineCap = 'round';
+  var lines = d.lines || [];
+  for (var j = 0; j < lines.length; j++) {
+    var l = lines[j];
+    ctx.strokeStyle = avmColor(l[4]);
+    ctx.beginPath(); ctx.moveTo(l[0] * sx, l[1] * sy); ctx.lineTo(l[2] * sx, l[3] * sy); ctx.stroke();
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+// ---- mouse interaction (rotate / zoom / pan) ----------------------------
+var drag = null;
+cv.addEventListener('mousedown', function (e) {
+  drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey }; cv.classList.add('grabbing');
+});
+window.addEventListener('mousemove', function (e) {
+  if (!drag) return;
+  var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.pan) { view.tx += dx; view.ty += dy; }
+  else { view.rot += dx * 0.01; view.tilt += dy * 0.01; }
+  drawScene();
+});
+window.addEventListener('mouseup', function () { drag = null; cv.classList.remove('grabbing'); });
+cv.addEventListener('wheel', function (e) {
+  e.preventDefault();
+  var f = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+  view.scale = Math.max(0.2, Math.min(8, view.scale * f));
+  drawScene();
+}, { passive: false });
+cv.addEventListener('dblclick', resetView);
+function resetView() { view = { rot: 0, tilt: 0, scale: 1, tx: 0, ty: 0 }; drawScene(); }
+$('resetview').addEventListener('click', resetView);
+
+var everConnected = false;
+setInterval(function () {
+  fetch('/api/lines').then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!everConnected) { everConnected = true; if (statusEl.textContent === 'connecting…') statusEl.textContent = 'ready'; }
+      lastData = d; drawScene();
+    }).catch(function () { statusEl.textContent = 'host unreachable'; });
+}, 120);
+
+// ---- source recovery (disassemble the selected .avm) --------------------
+$('source').addEventListener('click', function () {
+  var p = selected || pathInput.value.trim();
+  if (!p) { statusEl.textContent = '先に .avm ファイルを選んでください'; return; }
+  if (!isAvm(p)) { statusEl.textContent = p + ' は .avm ではありません'; return; }
+  $('srcTitle').textContent = '逆アセンブル結果 — ' + p;
+  $('srcBody').textContent = '復元中…';
+  $('srcOverlay').classList.add('on');
+  fetch('/api/host/disasm?path=' + encodeURIComponent(p))
+    .then(function (r) { return r.text(); })
+    .then(function (t) { $('srcBody').textContent = t; })
+    .catch(function () { $('srcBody').textContent = '(host unreachable)'; });
+});
+$('srcClose').addEventListener('click', function () { $('srcOverlay').classList.remove('on'); });
+$('srcOverlay').addEventListener('click', function (e) { if (e.target === $('srcOverlay')) $('srcOverlay').classList.remove('on'); });
+$('srcCopy').addEventListener('click', function () {
+  var t = $('srcBody').textContent;
+  if (navigator.clipboard) navigator.clipboard.writeText(t).then(function () { $('srcCopy').textContent = 'コピー済'; setTimeout(function () { $('srcCopy').textContent = 'コピー'; }, 1200); });
+});
+
+// ---- boot ---------------------------------------------------------------
+// Prefer a directory the user is likely to keep .avm files in; fall back to /.
+(function boot() {
+  var guesses = ['/Users', '/'];
+  (function tryNext(i) {
+    if (i >= guesses.length) { listDir('/'); return; }
+    fetch('/api/host/ls?path=' + encodeURIComponent(guesses[i])).then(function (r) { return r.json(); })
+      .then(function (d) { if (d && !d.error && d.type === 'dir') listDir(guesses[i]); else tryNext(i + 1); })
+      .catch(function () { tryNext(i + 1); });
+  })(0);
+})();
+</script>
+</body></html>

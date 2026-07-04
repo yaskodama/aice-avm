@@ -231,6 +231,79 @@ let loadrun rt (data : bytes) : int =
     id
   end
 
+(* ---- disassembler: recover a readable listing from a .avm module ----------
+   The .avm format is fully self-describing (magic, string table, classes,
+   methods, and the raw instruction stream), so the program can be recovered as
+   an annotated bytecode listing. What is NOT stored — and therefore cannot be
+   recovered — is the original .abcl comments and local-variable names; class /
+   method / field-count and the complete instruction stream ARE recovered. *)
+let disassemble (data : bytes) : string =
+  let m = read_module data in
+  let b = Buffer.create 8192 in
+  let cap = 3_000_000 and over = ref false in
+  let out s =
+    if not !over then
+      (if Buffer.length b > cap then (Buffer.add_string b "\n; ... (truncated) ...\n"; over := true)
+       else Buffer.add_string b s) in
+  out (Printf.sprintf "; AICE .avm module  —  %d string(s), %d class(es)\n"
+         (Array.length m.strings) (Array.length m.classes));
+  out "; Recovered by disassembly of the actor bytecode.\n";
+  out "; (Original .abcl comments and local names are not stored in .avm; the\n";
+  out ";  class/method/field structure and full instruction stream are.)\n\n";
+  if Array.length m.strings > 0 then begin
+    out "; string table:\n";
+    Array.iteri (fun i s -> out (Printf.sprintf ";   [%d] %S\n" i s)) m.strings;
+    out "\n"
+  end;
+  Array.iter (fun (c : cls) ->
+    out (Printf.sprintf "class %s {%s; fields: %d\n"
+           c.cname (String.make (max 1 (28 - String.length c.cname)) ' ') c.nfields);
+    List.iter (fun (mt : meth) ->
+      let params = String.concat ", " (List.init mt.nparams (fun i -> Printf.sprintf "a%d" i)) in
+      out (Printf.sprintf "  method %s(%s) {          ; code: %d bytes\n"
+             mt.mname params (Bytes.length mt.code));
+      let code = mt.code in
+      let clen = Bytes.length code in
+      let pc = ref 0 in
+      let rd8 () = let v = u8 code !pc in incr pc; v in
+      let rd16 () = let v = u16 code !pc in pc := !pc + 2; v in
+      let rd32 () = let v = i32 code !pc in pc := !pc + 4; v in
+      let str i = if i >= 0 && i < Array.length m.strings then m.strings.(i) else "?" in
+      let cnm i = if i >= 0 && i < Array.length m.classes then m.classes.(i).cname else "?" in
+      (try
+        while !pc < clen do
+          let at = !pc in
+          let op = rd8 () in
+          let line = (match op with
+            | 0x01 -> Printf.sprintf "PUSHI   %d" (rd32 ())
+            | 0x02 -> Printf.sprintf "LDF     f%d" (rd8 ())
+            | 0x03 -> Printf.sprintf "STF     f%d" (rd8 ())
+            | 0x04 -> Printf.sprintf "LDARG   a%d" (rd8 ())
+            | 0x05 -> "SELF" | 0x06 -> "SENDER" | 0x07 -> "WAIT" | 0x08 -> "DUP"
+            | 0x10 -> "ADD" | 0x11 -> "SUB" | 0x12 -> "MUL" | 0x13 -> "DIV" | 0x14 -> "MOD"
+            | 0x20 -> "LT" | 0x21 -> "LE" | 0x22 -> "GT" | 0x23 -> "GE" | 0x24 -> "EQ" | 0x25 -> "NE"
+            | 0x30 -> Printf.sprintf "JMP     -> %d" (rd16 ())
+            | 0x31 -> Printf.sprintf "JZ      -> %d" (rd16 ())
+            | 0x40 -> let mi = rd16 () in let na = rd8 () in
+                      Printf.sprintf "SEND    %s() args=%d" (str mi) na
+            | 0x41 -> let ci = rd16 () in Printf.sprintf "SPAWN   new %s" (cnm ci)
+            | 0x42 -> "PRINT"
+            | 0x43 -> "RET"
+            | 0x44 -> let fi = rd16 () in let na = rd8 () in
+                      Printf.sprintf "PRINTF  %S args=%d" (str fi) na
+            | 0x45 -> "LINE    (x1,y1,x2,y2,col)"
+            | 0x46 -> "CLS"
+            | 0x47 -> "TRI     (x1,y1,x2,y2,x3,y3,col)"
+            | x -> Printf.sprintf ".byte   0x%02x" x) in
+          out (Printf.sprintf "    %5d  %s\n" at line)
+        done
+      with _ -> out "    ; <decode ended>\n");
+      out "  }\n"
+    ) c.methods;
+    out "}\n\n"
+  ) m.classes;
+  Buffer.contents b
+
 (* Snapshot for /api/actors. *)
 let actor_table rt =
   with_lock rt (fun () ->

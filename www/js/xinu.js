@@ -172,6 +172,7 @@
       { label: '🖥  シェル (Shell)', act: () => openConsole(desktopInfo, { primary: false, title: 'xsh (shell)', x: px, y: py }) },
       { label: '📝  BASIC',          act: () => openBasic({ x: px, y: py }) },
       { label: '🧊  avm Finder',     act: () => openAvmFinder({ x: px, y: py }) },
+      { label: '📥  AVM 受信箱 (Inbox)', act: () => openInbox({ x: px, y: py }) },
     ];
     items.forEach((it) => {
       const el = document.createElement('div');
@@ -1175,10 +1176,18 @@
     mkfile(['etc'], 'version', 'aice-avm host VM\nbrowser desktop simulator\n');
     mkfile(['actors'], 'PingPong.abcl',
       'class Main {\n  method tick() { send new Ping().go(3); }\n}\n');
-    // Sample .avm module: the MAKINA-7 3D mesh display.
-    mkavm(['home', 'xinu'], 'MAKINA-7.avm', { kind: 'mesh', mesh: 'MAKINA', title: 'MAKINA-7' },
-      'AVM module: MAKINA-7 (3D mesh turntable display)\n' +
-      'Double-click in avm Finder to run — opens the software 3D Display.\n');
+    // MAKINA-7.avm — the real 3D-mesh character baked into a self-contained
+    // ACTOR .avm (true payload = the /avm/MakinaActor.avm asset). Runs on the
+    // host VM, streaming 10500 true-colour (0x01RRGGBB) triangles to the op_tri
+    // display. Because its real bytes live in a server asset, `cp` copies that
+    // binary faithfully — the on-disk file stays a runnable, full-colour 3D .avm
+    // (see runvm.html), not a text stub.
+    mkavm(['home', 'xinu'], 'MAKINA-7.avm',
+      { kind: 'actor', src: '/avm/MakinaActor.avm', title: 'MAKINA-7' },
+      'AVM actor module: MAKINA-7 (real 3D mesh, 10500 true-colour triangles).\n' +
+      'Double-click to load into the host VM — renders live in colour in the VM\n' +
+      'Graphics window. cp it to /computer to get the real .avm binary on disk,\n' +
+      'then run it from the "run an .avm file" page for the same colour 3D view.\n');
     // The real MAKINA-7 character baked into an ACTOR .avm: 3 actors
     // (Main/Makina/Display) stream 10500 solid triangles to the host VM's
     // op_tri "Blender display", shown live in the VM Graphics window.
@@ -1191,14 +1200,15 @@
     mkdir(['dev']);
     mkfile(['dev'], 'console', '(the live VM console — see the Xinu Console window)\n');
     mkdir(['tmp']);
-    // /computer is a mount onto the REAL host machine's filesystem (read-only),
+    // /computer is a mount onto the REAL host machine's filesystem (read-write),
     // served by the receiver's /api/host/* routes. `ls /computer` lists the
-    // actual root directory of the machine running the host VM.
+    // actual root directory of the machine running the host VM; cp/echo>/touch/
+    // mkdir/rm under it mutate the real machine.
     mkdir(['computer']).mount = 'host';
   }
   fsSeed();
 
-  // ---- real host filesystem, mounted at /computer (read-only) ----------
+  // ---- real host filesystem, mounted at /computer (read-write) ----------
   // Any resolved path whose first component is 'computer' is backed by the
   // host machine, not the in-memory VFS. hostPathOf(['computer','Users']) -> '/Users'.
   function isHostParts(parts) { return parts[0] === 'computer'; }
@@ -1206,6 +1216,58 @@
   function hostLs(parts) {
     return fetch('/api/host/ls?path=' + encodeURIComponent(hostPathOf(parts)))
       .then((r) => r.json());
+  }
+  // /computer is read-write: these back cp, echo>, touch, mkdir and rm on the
+  // real host machine via the receiver's /api/host/* mutation routes.
+  function hostCat(parts) {
+    return fetch('/api/host/cat?path=' + encodeURIComponent(hostPathOf(parts))).then((r) => r.text());
+  }
+  function hostWrite(parts, data) {
+    return fetch('/api/host/write?path=' + encodeURIComponent(hostPathOf(parts)),
+      { method: 'POST', body: data }).then((r) => r.json());
+  }
+  function hostMkdir(parts) {
+    return fetch('/api/host/mkdir?path=' + encodeURIComponent(hostPathOf(parts))).then((r) => r.json());
+  }
+  function hostRm(parts, rec) {
+    return fetch('/api/host/rm?path=' + encodeURIComponent(hostPathOf(parts)) + (rec ? '&r=1' : ''))
+      .then((r) => r.json());
+  }
+  function hostCp(srcParts, dstParts, rec) {
+    return fetch('/api/host/cp?src=' + encodeURIComponent(hostPathOf(srcParts)) +
+      '&dst=' + encodeURIComponent(hostPathOf(dstParts)) + (rec ? '&r=1' : '')).then((r) => r.json());
+  }
+  // Resolve the real bytes of a VFS file node for copying OUT to the host FS.
+  // A .avm module's real payload lives as a server asset (its avm.src), not in
+  // the node's `data` (which is only a human-readable note) — so a faithful cp
+  // must fetch those bytes. Returns a promise of a string or ArrayBuffer body.
+  function vfsFileBytes(node) {
+    if (node.avm && node.avm.src) {
+      return fetch(node.avm.src).then((r) => r.arrayBuffer());
+    }
+    return Promise.resolve(node.data || '');
+  }
+  // Deep-copy an in-memory VFS node (for cp of a VFS subtree). Preserves the
+  // `avm` descriptor so an .avm copied within the VFS keeps its type/payload.
+  function deepCopyNode(n) {
+    if (n.type === 'dir') {
+      const c = {};
+      for (const k in n.children) c[k] = deepCopyNode(n.children[k]);
+      return { type: 'dir', children: c };
+    }
+    const f = { type: 'file', data: n.data || '' };
+    if (n.avm) f.avm = n.avm;
+    return f;
+  }
+  // Resolve a cp destination: if it is an existing directory, copy INTO it
+  // under the source's basename (real cp semantics). Returns a promise of parts.
+  function cpResolveDst(dstParts, srcBase, dstHost) {
+    if (dstHost) {
+      return hostLs(dstParts).then((d) => (d && d.type === 'dir') ? dstParts.concat([srcBase]) : dstParts)
+        .catch(() => dstParts);
+    }
+    const node = fsLookup(dstParts);
+    return Promise.resolve((node && node.type === 'dir') ? dstParts.concat([srcBase]) : dstParts);
   }
 
   // Resolve a path (absolute or relative to cwd) to an array of name parts,
@@ -1341,8 +1403,8 @@
       if (!c) return;
       switch (c) {
         case 'help':
-          println('files: ls pwd cd cat mkdir touch rm echo tree');
-          println('host:  ls /computer  — browse the real machine filesystem (read-only)');
+          println('files: ls pwd cd cat cp mkdir touch rm echo tree');
+          println('host:  ls /computer  — browse the real machine filesystem (read-write)');
           println('system: help ver ps clear date basic avm loadvm blender rpi3 rpi4 rpi5 mesh about');
           break;
         case 'ver': println('Xinu (browser sim) — AIPL/AICE edition, build ' + (info.build || 'web')); break;
@@ -1415,9 +1477,73 @@
           break;
         }
 
+        case 'cp': {
+          let rec = false, args = a.slice(1);
+          if (args[0] === '-r' || args[0] === '-R' || args[0] === '-rf') { rec = true; args = args.slice(1); }
+          if (args.length < 2) { println('usage: cp [-r] <src> <dst>'); break; }
+          const srcParts = fsResolveParts(cwd, args[0]);
+          const dstParts = fsResolveParts(cwd, args[1]);
+          const srcHost = isHostParts(srcParts), dstHost = isHostParts(dstParts);
+          const srcBase = srcParts[srcParts.length - 1] || '';
+
+          // host -> host: server-side copy (handles dir-dst and -r itself).
+          if (srcHost && dstHost) {
+            return hostCp(srcParts, dstParts, rec)
+              .then((d) => { if (d.error) println('cp: ' + d.error, 'boot-warn'); })
+              .catch(() => println('cp: host unreachable', 'boot-warn'));
+          }
+
+          // vfs -> host: write the file's REAL bytes to the machine. For a .avm
+          // module that means its server-asset payload (avm.src), so the on-disk
+          // file is the true binary — not the descriptor's text note.
+          if (!srcHost && dstHost) {
+            const node = fsLookup(srcParts);
+            if (!node) { println('cp: ' + args[0] + ': No such file or directory', 'boot-warn'); break; }
+            if (node.type === 'dir') {
+              println('cp: ' + args[0] + ': recursive copy into /computer not supported', 'boot-warn'); break;
+            }
+            return cpResolveDst(dstParts, srcBase, true).then((fin) =>
+              vfsFileBytes(node).then((body) =>
+                hostWrite(fin, body).then((d) => { if (d.error) println('cp: ' + d.error, 'boot-warn'); })))
+              .catch(() => println('cp: host unreachable', 'boot-warn'));
+          }
+
+          // host -> vfs: read the machine file into a new in-memory file.
+          if (srcHost && !dstHost) {
+            return hostLs(srcParts).then((info) => {
+              if (info.error) { println('cp: ' + args[0] + ': ' + info.error, 'boot-warn'); return; }
+              if (info.type === 'dir') {
+                println('cp: ' + args[0] + ': recursive copy from /computer not supported', 'boot-warn'); return;
+              }
+              return hostCat(srcParts).then((t) => cpResolveDst(dstParts, srcBase, false).then((fin) => {
+                const { parent, name } = fsParentAndName(fin);
+                if (!parent || parent.type !== 'dir') { println('cp: ' + args[1] + ': No such file or directory', 'boot-warn'); return; }
+                parent.children[name] = { type: 'file', data: t };
+              }));
+            }).catch(() => println('cp: ' + args[0] + ': host unreachable', 'boot-warn'));
+          }
+
+          // vfs -> vfs: pure in-memory copy.
+          const node = fsLookup(srcParts);
+          if (!node) { println('cp: ' + args[0] + ': No such file or directory', 'boot-warn'); break; }
+          if (node.type === 'dir' && !rec) { println('cp: ' + args[0] + ': is a directory (use -r)', 'boot-warn'); break; }
+          return cpResolveDst(dstParts, srcBase, false).then((fin) => {
+            const { parent, name } = fsParentAndName(fin);
+            if (!parent || parent.type !== 'dir') { println('cp: ' + args[1] + ': No such file or directory', 'boot-warn'); return; }
+            parent.children[name] = (node.type === 'dir') ? deepCopyNode(node)
+              : (function () { const f = { type: 'file', data: node.data || '' }; if (node.avm) f.avm = node.avm; return f; })();
+          });
+        }
+
         case 'mkdir': {
           if (!a[1]) { println('usage: mkdir <dir>'); break; }
-          if (isHostParts(fsResolveParts(cwd, a[1]))) { println('mkdir: /computer is read-only', 'boot-warn'); break; }
+          {
+            const hp = fsResolveParts(cwd, a[1]);
+            if (isHostParts(hp)) {
+              return hostMkdir(hp).then((d) => { if (d.error) println('mkdir: ' + d.error, 'boot-warn'); })
+                .catch(() => println('mkdir: host unreachable', 'boot-warn'));
+            }
+          }
           const { parent, name } = fsParentAndName(fsResolveParts(cwd, a[1]));
           if (!parent || parent.type !== 'dir') { println('mkdir: ' + a[1] + ': No such file or directory', 'boot-warn'); break; }
           if (parent.children[name]) { println('mkdir: ' + a[1] + ': File exists', 'boot-warn'); break; }
@@ -1427,7 +1553,15 @@
 
         case 'touch': {
           if (!a[1]) { println('usage: touch <file>'); break; }
-          if (isHostParts(fsResolveParts(cwd, a[1]))) { println('touch: /computer is read-only', 'boot-warn'); break; }
+          {
+            const hp = fsResolveParts(cwd, a[1]);
+            if (isHostParts(hp)) {
+              return hostLs(hp).then((d) => {
+                if (d && !d.error) return; // exists — leave contents intact
+                return hostWrite(hp, '').then((w) => { if (w.error) println('touch: ' + w.error, 'boot-warn'); });
+              }).catch(() => println('touch: host unreachable', 'boot-warn'));
+            }
+          }
           const { parent, name } = fsParentAndName(fsResolveParts(cwd, a[1]));
           if (!parent || parent.type !== 'dir') { println('touch: ' + a[1] + ': No such file or directory', 'boot-warn'); break; }
           if (!parent.children[name]) parent.children[name] = { type: 'file', data: '' };
@@ -1439,7 +1573,11 @@
           if (a[1] === '-r' || a[1] === '-rf' || a[1] === '-R') { rec = true; targ = a[2]; }
           if (!targ) { println('usage: rm [-r] <path>'); break; }
           const parts = fsResolveParts(cwd, targ);
-          if (isHostParts(parts)) { println('rm: /computer is read-only', 'boot-warn'); break; }
+          if (isHostParts(parts)) {
+            if (parts.length <= 1) { println('rm: refusing to remove /computer root', 'boot-warn'); break; }
+            return hostRm(parts, rec).then((d) => { if (d.error) println('rm: ' + d.error, 'boot-warn'); })
+              .catch(() => println('rm: host unreachable', 'boot-warn'));
+          }
           if (!parts.length) { println('rm: cannot remove /', 'boot-warn'); break; }
           const node = fsLookup(parts);
           if (!node) { println('rm: ' + targ + ': No such file or directory', 'boot-warn'); break; }
@@ -1453,7 +1591,21 @@
           const rest = cmd.slice(4).replace(/^\s+/, '');
           const m = rest.match(/^(.*?)\s*(>>|>)\s*(\S+)\s*$/);
           if (!m) { println(stripQuotes(rest)); break; }
-          if (isHostParts(fsResolveParts(cwd, m[3]))) { println('echo: /computer is read-only', 'boot-warn'); break; }
+          {
+            const hp = fsResolveParts(cwd, m[3]);
+            if (isHostParts(hp)) {
+              const content = stripQuotes(m[1]) + '\n';
+              if (m[2] === '>>') {
+                return hostCat(hp).then((prev) => {
+                  const base = (prev && prev.indexOf('cat: ') === 0) ? '' : prev;
+                  return hostWrite(hp, base + content);
+                }).then((w) => { if (w && w.error) println('echo: ' + w.error, 'boot-warn'); })
+                  .catch(() => println('echo: host unreachable', 'boot-warn'));
+              }
+              return hostWrite(hp, content).then((w) => { if (w.error) println('echo: ' + w.error, 'boot-warn'); })
+                .catch(() => println('echo: host unreachable', 'boot-warn'));
+            }
+          }
           const { parent, name } = fsParentAndName(fsResolveParts(cwd, m[3]));
           if (!parent || parent.type !== 'dir') { println('echo: ' + m[3] + ': No such file or directory', 'boot-warn'); break; }
           let f = parent.children[name];
@@ -1714,6 +1866,112 @@
   }
 
   function xlog(msg, cls) { if (window.__xinuLog) window.__xinuLog(msg, cls); }
+
+  // ---- AVM 受信箱 (Inbox): modules received from other machines ----------
+  // The unified reception point: every .avm pushed to this receiver's
+  // POST /actor/loadvm (the `send` tool, a Pi board, another aice-avm) is
+  // recorded by the server and listed here. Each item can be re-run on the host
+  // VM, disassembled back to a bytecode listing, or saved to the host FS.
+  function openInbox(opts) {
+    const node = document.createElement('div');
+    node.className = 'basic-wrap';
+    node.innerHTML =
+      '<div class="basic-toolbar">' +
+      '<span style="color:#8b949e">他マシンから送信された .avm の受信箱</span>' +
+      '<span style="flex:1"></span>' +
+      '<label style="color:#8b949e;font-size:11px"><input type="checkbox" class="ib-auto" checked> 自動更新</label>' +
+      '<button data-act="refresh">🔄 更新</button>' +
+      '</div>' +
+      '<div class="ib-list" style="flex:1;overflow:auto;font-size:12px"></div>' +
+      '<div class="basic-output ib-out" style="max-height:120px;color:#7dcfff;white-space:pre-wrap"></div>';
+    const { win } = makeWindow({ title: 'AVM 受信箱 (Inbox)', x: (opts && opts.x) || 120, y: (opts && opts.y) || 90,
+      w: 560, h: 420, node, onClose: () => { alive = false; } });
+    const listEl = node.querySelector('.ib-list');
+    const outEl = node.querySelector('.ib-out');
+    const autoEl = node.querySelector('.ib-auto');
+    let alive = true;
+    function ibout(t) { outEl.textContent = t; }
+
+    function fmtSize(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1048576) return (n / 1024).toFixed(1) + ' K';
+      return (n / 1048576).toFixed(1) + ' M';
+    }
+    function fmtTime(ts) { try { return new Date(ts * 1000).toLocaleTimeString(); } catch (_e) { return ''; } }
+
+    async function run(id) {
+      ibout('running #' + id + ' …');
+      try { const d = await (await fetch('/api/inbox/run?id=' + id)).json();
+        ibout(d.error ? ('run: ' + d.error) : ('▶ ran #' + id + ' → actor id=' + d.actor + '（VM Graphics に表示）'));
+        openVmGraphics();
+      } catch (_e) { ibout('run: host unreachable'); }
+    }
+    async function disasm(id, name) {
+      ibout('disassembling #' + id + ' …');
+      try {
+        const t = await (await fetch('/api/inbox/disasm?id=' + id)).text();
+        ibout('');
+        openTextWindow('逆アセンブル — ' + (name || ('#' + id)), t);
+      } catch (_e) { ibout('disasm: host unreachable'); }
+    }
+    async function save(id, name) {
+      const p = prompt('保存先（ホストの絶対パス）:', '/Users/' + (name || ('inbox-' + id + '.avm')));
+      if (!p) return;
+      ibout('saving #' + id + ' → ' + p + ' …');
+      try { const d = await (await fetch('/api/inbox/save?id=' + id + '&path=' + encodeURIComponent(p))).json();
+        ibout(d.error ? ('save: ' + d.error) : ('💾 saved ' + d.bytes + ' B → ' + d.path));
+      } catch (_e) { ibout('save: host unreachable'); }
+    }
+
+    async function refresh() {
+      let items;
+      try { items = await (await fetch('/api/inbox')).json(); }
+      catch (_e) { listEl.innerHTML = '<div style="color:#f0a0a0;padding:8px">host unreachable</div>'; return; }
+      if (!items.length) {
+        listEl.innerHTML = '<div style="color:#8b949e;padding:10px">まだ受信はありません。\n他マシンから  send <host>:8080 file.avm  で送信すると、ここに表示されます。</div>';
+        return;
+      }
+      listEl.innerHTML = '';
+      items.forEach((e) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:7px 8px;border-bottom:1px solid #1c2740';
+        const info = document.createElement('div');
+        info.style.cssText = 'flex:1;min-width:0';
+        info.innerHTML = '<div style="color:#9ece6a;font-weight:600;overflow:hidden;text-overflow:ellipsis">' +
+          escapeHtml(e.name) + (e.ran ? ' <span style="color:#7aa2f7;font-weight:400">· 実行済</span>' : '') + '</div>' +
+          '<div style="color:#8b949e;font-size:11px">#' + e.id + ' · from ' + escapeHtml(e.from) +
+          ' · ' + fmtSize(e.size) + ' · ' + fmtTime(e.ts) + '</div>';
+        row.appendChild(info);
+        [['▶ 実行', () => run(e.id)], ['&lt;/&gt; ソース', () => disasm(e.id, e.name)], ['💾 保存', () => save(e.id, e.name)]]
+          .forEach(([label, fn]) => {
+            const b = document.createElement('button');
+            b.innerHTML = label; b.style.cssText = 'font-size:11px;padding:4px 8px';
+            b.addEventListener('click', fn); row.appendChild(b);
+          });
+        listEl.appendChild(row);
+      });
+    }
+    node.querySelector('[data-act=refresh]').addEventListener('click', refresh);
+    refresh();
+    (function poll() {
+      if (!alive) return;
+      if (autoEl.checked) refresh();
+      setTimeout(poll, 1500);
+    })();
+    xlog('[inbox] AVM 受信箱を開きました（POST /actor/loadvm の受信を一覧）', 'boot-info');
+    return win;
+  }
+
+  // A simple scrollable text window (used for disassembly output).
+  function openTextWindow(title, text) {
+    const node = document.createElement('div');
+    node.className = 'basic-wrap';
+    const pre = document.createElement('pre');
+    pre.textContent = text;
+    pre.style.cssText = 'margin:0;flex:1;overflow:auto;white-space:pre;font:12px/1.45 ui-monospace,monospace;color:#b8d4c0;padding:8px';
+    node.appendChild(pre);
+    makeWindow({ title, x: 200, y: 130, w: 620, h: 460, node });
+  }
 
   function openLoader() {
     const node = document.createElement('div');
