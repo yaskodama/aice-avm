@@ -718,6 +718,38 @@ let mesh_bench path =
         http_get_lan host port (Printf.sprintf "/bench?kind=%s&n=%d" kind n)
     | other -> Printf.sprintf "bench-error: kind '%s' has no board route yet" other
 
+(* The desktop Actor Loader's "Binarize/Save" produces an "AVM1" container that
+   wraps .abcl SOURCE (not compiled bytecode):
+     "AVM1" | ver(1) | flags(1) | nameLen(1) | name | srcLen(u32 LE) | source
+   The VM loader (runvm / loadvm / disasm) expects a compiled AVM module, so a
+   saved .avm from the Actor Loader would fail to open.  Detect the container,
+   extract the source and compile it here; pass any other bytes through
+   unchanged so real .avm bytecode still loads directly. *)
+let module_of_bytes (data : string) : bytes =
+  let n = String.length data in
+  (* NOTE: a COMPILED module also starts with "AVM1" (its bytes 4..5 are the
+     u16 string count).  A source container is distinguished by ver=1, flags=0
+     AND an exact total length of 7 + nameLen + 4 + srcLen — a real module would
+     have to have exactly 1 string AND that precise size to be mistaken, which
+     does not happen.  Anything else is passed through as compiled bytecode. *)
+  let looks_source =
+    n >= 11 && data.[0] = 'A' && data.[1] = 'V' && data.[2] = 'M' && data.[3] = '1'
+    && Char.code data.[4] = 1 && Char.code data.[5] = 0 in
+  if not looks_source then Bytes.of_string data
+  else
+    let name_len = Char.code data.[6] in
+    let o = 7 + name_len in
+    if o + 4 > n then Bytes.of_string data
+    else
+      let src_len =
+        (Char.code data.[o])
+        lor (Char.code data.[o + 1] lsl 8)
+        lor (Char.code data.[o + 2] lsl 16)
+        lor (Char.code data.[o + 3] lsl 24) in
+      let src_start = o + 4 in
+      if src_len < 0 || src_start + src_len <> n then Bytes.of_string data
+      else Compile.compile_source (String.sub data src_start src_len)
+
 (* /mesh/cmd?host=H[&port=P]&via=run|shell&c=wifi%20status — proxy a shell
    command to a board's /run (rpi5) or /shell (rpi3/rpi4) route and return its
    raw text.  Lets the desktop read mesh status / AODV results despite CORS. *)
@@ -790,7 +822,7 @@ let handle rt fd =
       else if starts_with path "/actor/loadvm" then begin
         let skip = find_sub path "ask=0" >= 0 || find_sub path "noask" >= 0 in
         let accepted = if skip || not !ask_default then true else ask_console (String.length body) in
-        let id = if accepted then Avm.loadrun rt (Bytes.of_string body) else -1 in
+        let id = if accepted then (try Avm.loadrun rt (module_of_bytes body) with _ -> -1) else -1 in
         (* record every received module in the inbox (surfaced in the desktop) *)
         let nm = let n = str_param path "name" in
                  if n = "" then "incoming.avm" else url_decode n in
@@ -835,7 +867,7 @@ let handle rt fd =
          | None -> http_json (Printf.sprintf "{\"error\":%s}" (jstr (p ^ ": cannot read")))
          | Some data ->
             (try
-               let id = Avm.loadrun rt (Bytes.of_string data) in
+               let id = Avm.loadrun rt (module_of_bytes data) in
                if id < 0 then
                  http_json (Printf.sprintf
                    "{\"error\":%s}"
@@ -851,7 +883,7 @@ let handle rt fd =
         (match read_file_opt p with
          | None -> http_text ("disasm: " ^ p ^ ": cannot read")
          | Some data ->
-            (try http_text (Avm.disassemble (Bytes.of_string data))
+            (try http_text (Avm.disassemble (module_of_bytes data))
              with e -> http_text ("disasm: not a valid .avm module (" ^ Printexc.to_string e ^ ")")))
       end
       else if starts_with path "/api/cls" then begin

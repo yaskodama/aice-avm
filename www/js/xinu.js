@@ -1795,19 +1795,47 @@
     '  }\n' +
     '}';
 
-  const MAKINA_ACTOR =
-    'class Main {\n' +
-    '  var m = 0;\n' +
-    '  method tick() { m = new Makina(); send m.walk(6); }\n' +
-    '}\n' +
-    'class Makina {\n' +
-    '  var step = 0;\n' +
-    '  method walk(n) {\n' +
-    '    print(step * 30);\n' +   // hip angle (deg), integer FK gait
-    '    step = step + 1;\n' +
-    '    if (step < n) { send self.walk(n); }\n' +
-    '  }\n' +
-    '}';
+  // MAKINA-7 — a walking cyber-gal robot drawn LIVE with the host VM's line()
+  // primitive, so it renders both in the desktop "VM Graphics" window and in
+  // runvm.html ("run an .avm file"). Auto-runs Main.tick(); loops forever via
+  // send self.frame() (+ wait) until the receiver restarts. Colours are 16-VM
+  // palette indices (5=pink, 3=cyan visor, 9=light-blue limbs, 6=antenna).
+  const MAKINA_ACTOR = `class Main {
+  var t = 0;
+  var s = 0;
+  var a = 0;
+  var p = 0;
+  method tick() { send self.frame(); }
+  method frame() {
+    cls();
+    p = t % 40;
+    if (p < 20) { s = 0 - 18 + 36 * p / 20; }
+    else { s = 18 - 36 * (p - 20) / 20; }
+    a = 0 - s;
+    line(360, 472, 460, 472, 8);
+    line(410, 110, 410, 150, 6);
+    line(404, 118, 410, 110, 6);
+    line(380, 150, 440, 150, 5);
+    line(380, 150, 380, 214, 5);
+    line(440, 150, 440, 214, 5);
+    line(380, 214, 440, 214, 5);
+    line(388, 184, 432, 184, 3);
+    line(410, 214, 410, 232, 9);
+    line(378, 236, 442, 236, 5);
+    line(392, 236, 400, 336, 5);
+    line(428, 236, 420, 336, 5);
+    line(400, 336, 420, 336, 5);
+    line(380, 238, 360 + a, 322, 9);
+    line(440, 238, 460 - a, 322, 9);
+    line(405, 336, 393 + s, 456, 9);
+    line(415, 336, 427 - s, 456, 9);
+    line(384 + s, 456, 402 + s, 456, 15);
+    line(418 - s, 456, 436 - s, 456, 15);
+    t = t + 1;
+    wait(70);
+    send self.frame();
+  }
+}`;
 
   const PINGPONG_ACTOR =
     'class Main {\n' +
