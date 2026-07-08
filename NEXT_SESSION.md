@@ -1,10 +1,39 @@
-# aice-avm — 次回セッション引き継ぎ (2026-07-01 更新)
+# aice-avm — 次回セッション引き継ぎ (2026-07-08 更新)
 
 OCaml 本物 AVM ホスト VM（Win/Mac/Linux、stdlib のみ）。GitHub `yaskodama/aice-avm`（public）。
 **Web Xinu デスクトップ UI を合体**して「git clone → start だけで動くダウンロード配布アプリ」にするプロジェクト。
 
+## ★2026-07-08 セッションの変更（main `c3a9250` に push 済み）
+1. **BASIC グラフィックデモ5本を移植**（`78a63fe`）。`www/js/xinu.js` の Tiny BASIC を
+   カーネル BASIC 方言に拡張し、`~/projects/xinu-raz/xinu/apps/basic.c`（=rpi3 実機正本）から
+   rescue/dragon/koch/bubble/qsort を**無改変**で移植。BASIC 窓のプルダウンで選択 → ▶ RUN。
+   - 追加した方言: ラベル `*NAME`/`GOTO|GOSUB *NAME`、`LINE (x,y)-(x,y),色名`・`CIRCLE (x,y),r,色名`
+     （名前色 BLUE/GREEN/YELLOW/CYAN/RED/MAGENTA…、ネスト括弧対応）、`CLS n`、配列 `DIM a(n)`/`a(i)`、
+     `WAIT 秒`（引数なしは約0.6s一時停止）、`BUTTON id,"label",line`＋`STR$()`（koch のクリックUI）。
+   - キャンバスを 640×400 に拡大（カーネル座標に一致）。koch は下部 Level± ボタンで再帰階層変更。
+   - 検証: Node スタブで全5本エラー0。bubble/qsort は最終フレームの棒が実際に昇順整列を確認。
+2. **runvm.html 互換化 + MAKINA 描画版**（`c3a9250`）。★重要な落とし穴の解消:
+   - Actor Loader の Binarize/Save は `.abcl` **ソースを内包する "AVM1" コンテナ**を出力するが、
+     runvm.html（`/api/host/runvm`）はコンパイル済み .avm を期待し開けなかった。
+   - `server.ml` に `module_of_bytes` を追加：先頭 "AVM1" かつ **ver=1・flags=0・全長が
+     `7+nameLen+4+srcLen` にピタリ一致** なら AVM1 ソースコンテナと判定し `Compile.compile_source`
+     でコンパイル、それ以外は生バイト（コンパイル済みモジュール。これも先頭 "AVM1"）としてそのまま
+     実行。**コンパイル済みモジュールも magic "AVM1" なので、ver/flags＋厳密全長一致で区別**するのが肝。
+     runvm / loadvm / disasm の3経路に適用。
+   - Actor Loader の MAKINA サンプルは `print` だけで描画ゼロ→ runvm で何も出なかった。`cls()`/`line()`/
+     `wait()` で歩行する MAKINA-7 ロボットを `send self` ループで描く版に置換（`MAKINA_ACTOR`）。
+   - 検証: 本物 `www/avm/MakinaActor.avm`(430KB, 7700三角形)は回帰なし。AVM1 版 `~/Downloads/MAKINA.avm`
+     は runvm で `{"ok":true}` + 19本描画（歩行ロボット表示）。
+   - ★これで [落とし穴] の「AVM1=動く/AVM2=不可」に加え、**AVM1 ソースコンテナも runvm/loadvm で開ける**。
+
+### 描画アクターを書くときのメモ（compile.ml/avm.ml）
+- 命令: `cls()`=0x46, `line(x1,y1,x2,y2,col)`=0x45, `tri(...)`=0x47, `wait(ms)`=0x07, `print(a)`。
+- 色: 16色パレット index、または 24bit トゥルーカラー `0x01RRGGBB`。制約は下の「VM サブセット制約」参照。
+- 演算子優先順位は標準（`* / %` > `+ -` > 比較）。アニメは `send self` ループ＋`wait()`。
+
 ## ★現状サマリ
-- HEAD **`873d8a7`**（main に push 済み, 2026-07-01）。それ以前の M1+M2 完了 = タグ **`v0.6.0`** で Release 公開済み
+- HEAD **`c3a9250`**（main に push 済み, 2026-07-08。上記「2026-07-08 セッションの変更」）。
+  以前の主要点は下記（`873d8a7` = `/computer` 実FS・自動更新, 2026-07-01）。M1+M2 完了 = タグ **`v0.6.0`** で Release 公開済み
   → https://github.com/yaskodama/aice-avm/releases/tag/v0.6.0
 - Release アセット 6 個（CI が 3OS ビルド）: `server.exe`/`send.exe`(Win)・
   `server-linux-x86_64`/`send-linux-x86_64`・**`server-macos-arm64`/`send-macos-arm64`**。
