@@ -1718,6 +1718,11 @@
     Fib: '10 REM fibonacci\n20 LET A=0\n30 LET B=1\n40 FOR I=1 TO 12\n50 PRINT A;\n60 PRINT " ";\n70 LET C=A+B\n80 LET A=B\n90 LET B=C\n100 NEXT I\n110 PRINT ""',
     Lines: '10 CLS\n20 FOR I=0 TO 240 STEP 20\n30 LINE 0,I,I,180\n40 NEXT I\n50 COLOR 1\n60 CIRCLE 120,90,40',
     'Rotate (回転)': '10 REM rotating line segment / 線分の回転\n20 LET A=0\n30 CLS\n40 COLOR 5\n50 CIRCLE 120,90,72\n60 LET X=120+70*COS(A)\n70 LET Y=90+70*SIN(A)\n80 COLOR 2\n90 LINE 120,90,X,Y\n100 PLOT X,Y\n110 PAUSE 30\n120 LET A=A+0.18\n130 GOTO 30',
+    "Rescue (救助)": "10 CLS 3\n20 PI = 3.14159265\n30 H = 5\n40 VX0 = 6\n50 VZ0 = 5\n60 CX = 0\n70 CY = 2.5\n80 CZ = -6\n90 DIM TX(3)\n100 DIM TZ(3)\n110 TX(0) = 0.5\n120 TZ(0) = 0.5\n130 TX(1) = 0.5\n140 TZ(1) = -0.5\n150 TX(2) = -0.5\n160 TZ(2) = -0.5\n170 TX(3) = -0.5\n180 TZ(3) = 0.5\n190 DIM TSX(3)\n200 DIM TSY(3)\n210 DIM TOK(3)\n220 T = 0\n225 C = 0\n230 *FRAME\n240 CLS 2\n250 IF T < 30 THEN GOTO *PH1\n260 IF T < 90 THEN GOTO *PH2\n270 IF T < 105 THEN GOTO *PH3\n280 IF T < 120 THEN GOTO *PH4\n290 IF T < 135 THEN GOTO *PH5\n300 IF T < 195 THEN GOTO *PH6\n310 IF T < 225 THEN GOTO *PH7\n320 GOTO *PH8\n330 *PH1\n340 DPX = 0\n350 DPY = T * H / 30\n360 DPZ = 0\n370 GOTO *VPHASE\n380 *PH2\n390 U = (T - 30) / 60\n400 DPX = U * VX0\n410 DPY = H\n420 DPZ = U * VZ0\n430 GOTO *VPHASE\n440 *PH3\n450 U = (T - 90) / 15\n460 DPX = VX0\n470 DPY = H - U * (H - 1)\n480 DPZ = VZ0\n490 GOTO *VPHASE\n500 *PH4\n510 DPX = VX0\n520 DPY = 1\n530 DPZ = VZ0\n540 GOTO *VPHASE\n550 *PH5\n560 U = (T - 120) / 15\n570 DPX = VX0\n580 DPY = 1 + U * (H - 1)\n590 DPZ = VZ0\n600 GOTO *VPHASE\n610 *PH6\n620 U = (T - 135) / 60\n630 DPX = VX0 * (1 - U)\n640 DPY = H\n650 DPZ = VZ0 * (1 - U)\n660 GOTO *VPHASE\n670 *PH7\n680 U = (T - 195) / 30\n690 DPX = 0\n700 DPY = H * (1 - U)\n710 DPZ = 0\n720 GOTO *VPHASE\n730 *PH8\n740 DPX = 0\n750 DPY = 0\n760 DPZ = 0\n770 *VPHASE\n780 IF T < 105 THEN GOTO *VP1\n790 IF T < 120 THEN GOTO *VP2\n800 GOTO *VP3\n810 *VP1\n820 VPX = VX0\n830 VPY = 0\n840 VPZ = VZ0\n850 GOTO *VPEND\n860 *VP2\n870 U = (T - 105) / 15\n880 VPX = VX0\n890 VPY = U\n900 VPZ = VZ0\n910 GOTO *VPEND\n920 *VP3\n930 VPX = DPX\n940 VPY = DPY - 0.7\n950 VPZ = DPZ\n955 IF VPY < 0 THEN VPY = 0\n960 *VPEND\n970 VAR = 0.5 + 0.4 * SIN(T * 0.5)\n980 SVAR = SIN(VAR)\n990 CVAR = COS(VAR)\n1000 FOR I = 0 TO 2\n1010 ZL = I * 4\n1020 WX = -5\n1030 WY = 0\n1040 WZ = ZL\n1050 GOSUB *PROJ\n1060 GSX = SX\n1070 GSY = SY\n1080 GOK = OK\n1090 WX = 5\n1100 GOSUB *PROJ\n1110 IF GOK = 1 THEN IF OK = 1 THEN LINE (GSX,GSY)-(SX,SY),BLUE\n1120 NEXT\n1130 FOR I = 0 TO 2\n1140 XL = -5 + I * 5\n1150 WX = XL\n1160 WY = 0\n1170 WZ = -2\n1180 GOSUB *PROJ\n1190 GSX = SX\n1200 GSY = SY\n1210 GOK = OK\n1220 WZ = 10\n1230 GOSUB *PROJ\n1240 IF GOK = 1 THEN IF OK = 1 THEN LINE (GSX,GSY)-(SX,SY),BLUE\n1250 NEXT\n1260 WX = VPX\n1270 WY = VPY\n1280 WZ = VPZ\n1290 GOSUB *PROJ\n1300 SBSX = SX\n1310 SBSY = SY\n1320 SBOK = OK\n1330 WY = VPY + 1.4\n1340 GOSUB *PROJ\n1350 SHSX = SX\n1360 SHSY = SY\n1370 SHOK = OK\n1380 WY = VPY + 1.7\n1390 GOSUB *PROJ\n1400 IF SBOK = 1 THEN IF SHOK = 1 THEN LINE (SBSX,SBSY)-(SHSX,SHSY),GREEN\n1405 HR = 75 / (VPZ - CZ)\n1410 IF OK = 1 THEN CIRCLE (SX,SY),HR,GREEN\n1420 WX = VPX - SVAR * 0.5\n1430 WY = VPY + 1.4 + CVAR * 0.5\n1440 WZ = VPZ\n1450 GOSUB *PROJ\n1460 IF SHOK = 1 THEN IF OK = 1 THEN LINE (SHSX,SHSY)-(SX,SY),GREEN\n1470 WX = VPX + SVAR * 0.5\n1480 GOSUB *PROJ\n1490 IF SHOK = 1 THEN IF OK = 1 THEN LINE (SHSX,SHSY)-(SX,SY),GREEN\n1500 WX = DPX\n1510 WY = DPY\n1520 WZ = DPZ\n1530 GOSUB *PROJ\n1540 DCSX = SX\n1550 DCSY = SY\n1560 DCOK = OK\n1570 FOR I = 0 TO 3\n1580 WX = DPX + TX(I)\n1590 WY = DPY\n1600 WZ = DPZ + TZ(I)\n1610 GOSUB *PROJ\n1620 TSX(I) = SX\n1630 TSY(I) = SY\n1640 TOK(I) = OK\n1650 NEXT\n1660 FOR I = 0 TO 3\n1670 IF DCOK = 1 THEN IF TOK(I) = 1 THEN LINE (DCSX,DCSY)-(TSX(I),TSY(I)),YELLOW\n1680 NEXT\n1690 DR = 60 / (DPZ - CZ)\n1700 FOR I = 0 TO 3\n1710 IF TOK(I) = 1 THEN CIRCLE (TSX(I),TSY(I)),DR,CYAN\n1720 NEXT\n1730 T = T + 5\n1740 IF T < 240 THEN GOTO 1750\n1742 C = C + 1\n1744 T = 0\n1746 IF C >= 3 THEN GOTO 1765\n1750 WAIT 0.01\n1760 GOTO *FRAME\n1765 CLS 1\n1766 PRINT \"RESCUE COMPLETE\"\n1767 END\n1770 *PROJ\n1780 DX = WX - CX\n1790 DY = WY - CY\n1800 DZ = WZ - CZ\n1810 OK = 1\n1820 IF DZ < 0.5 THEN OK = 0\n1830 IF OK = 0 THEN RETURN\n1840 SX = 320 + 300 * DX / DZ\n1850 SY = 200 - 300 * DY / DZ\n1860 RETURN",
+    "Dragon (ドラゴン曲線)": "10 CLS 3\n20 X = 200\n30 Y = 130\n40 A = 0\n50 L = 15\n60 D = 8\n70 GOSUB *DRAGA\n80 END\n100 *DRAGA\n110 IF D > 0 THEN GOTO 200\n120 GOSUB *DRAW\n130 RETURN\n200 D = D - 1\n210 GOSUB *DRAGA\n220 A = A + 90\n230 GOSUB *DRAGB\n240 D = D + 1\n250 RETURN\n300 *DRAGB\n310 IF D > 0 THEN GOTO 400\n320 GOSUB *DRAW\n330 RETURN\n400 D = D - 1\n410 GOSUB *DRAGA\n420 A = A - 90\n430 GOSUB *DRAGB\n440 D = D + 1\n450 RETURN\n500 *DRAW\n510 RAD = A * 0.01745329\n520 X2 = X + L * COS(RAD)\n530 Y2 = Y - L * SIN(RAD)\n540 LINE (X,Y)-(X2,Y2),CYAN\n550 X = X2\n560 Y = Y2\n570 RETURN",
+    "Koch (コッホ雪片)": "10 CLS 3\n20 D = 4\n30 BUTTON 0, \"Level -\", 300\n40 BUTTON 1, \"Level +\", 350\n50 GOSUB *SHOW\n60 GOSUB *REDRAW\n70 *LOOP\n80 WAIT 0.1\n90 GOTO *LOOP\n300 D = D - 1\n310 IF D < 1 THEN D = 1\n320 GOSUB *SHOW\n330 GOSUB *REDRAW\n340 RETURN\n350 D = D + 1\n360 IF D > 10 THEN D = 10\n370 GOSUB *SHOW\n380 GOSUB *REDRAW\n390 RETURN\n400 *SHOW\n410 BUTTON 2, \"LEVEL \" + STR$(D)\n420 RETURN\n430 *REDRAW\n440 CLS 3\n450 X = 50\n460 Y = 280\n470 A = 0\n480 L = 486\n490 GOSUB *KOCH\n500 RETURN\n510 *KOCH\n520 IF D > 0 THEN GOTO 600\n530 GOSUB *DRAW\n540 RETURN\n600 D = D - 1\n610 L = L / 3\n620 GOSUB *KOCH\n630 A = A + 60\n640 GOSUB *KOCH\n650 A = A - 120\n660 GOSUB *KOCH\n670 A = A + 60\n680 GOSUB *KOCH\n690 D = D + 1\n700 L = L * 3\n710 RETURN\n720 *DRAW\n730 RAD = A * 0.01745329\n740 X2 = X + L * COS(RAD)\n750 Y2 = Y - L * SIN(RAD)\n760 LINE (X,Y)-(X2,Y2),CYAN\n770 X = X2\n780 Y = Y2\n790 RETURN",
+    "Bubble Sort (バブルソート)": "10 CLS 3\n20 N = 100\n30 DIM A(100)\n40 FOR I = 0 TO N - 1\n50 A(I) = INT(RND(100)) + 1\n60 NEXT\n70 PRINT \"BUBBLE SORT - 100 ELEMENTS\"\n80 GOSUB *DRAWALL\n90 WAIT\n100 FOR I = 0 TO N - 2\n110 FOR J = 0 TO N - 2 - I\n120 IF A(J) > A(J+1) THEN GOSUB *SWAP\n130 NEXT\n140 GOSUB *DRAWALL\n150 WAIT 0.05\n160 NEXT\n170 REM keep the bars on screen\n180 END\n500 *SWAP\n510 T = A(J)\n520 A(J) = A(J+1)\n530 A(J+1) = T\n540 RETURN\n700 *DRAWALL\n710 CLS 2\n720 FOR K = 0 TO N - 1\n730 V = A(K)\n740 BX = 30 + K * 6\n750 BY = 290 - V * 2\n760 LINE (BX,BY)-(BX,290),CYAN\n770 NEXT\n780 RETURN",
+    "Quick Sort (クイックソート)": "10 CLS 3\n20 N = 100\n30 DIM A(100)\n40 DIM SL(200)\n50 DIM SH(200)\n60 FOR I = 0 TO N - 1\n70 A(I) = INT(RND(100)) + 1\n80 NEXT\n90 PRINT \"QUICKSORT - 100 ELEMENTS\"\n100 GOSUB *DRAWALL\n110 WAIT\n120 SP = 0\n130 SL(SP) = 0\n140 SH(SP) = N - 1\n150 SP = SP + 1\n160 IF SP = 0 THEN GOTO 350\n170 SP = SP - 1\n180 LOW = SL(SP)\n190 HIGH = SH(SP)\n200 IF LOW >= HIGH THEN GOTO 160\n210 GOSUB *PART\n220 SL(SP) = LOW\n230 SH(SP) = P - 1\n240 SP = SP + 1\n250 SL(SP) = P + 1\n260 SH(SP) = HIGH\n270 SP = SP + 1\n280 GOSUB *DRAWALL\n290 WAIT 0.05\n300 GOTO 160\n350 PRINT \"DONE!\"\n360 GOSUB *DRAWALL\n370 END\n500 *PART\n510 PIVOT = A(HIGH)\n520 I = LOW - 1\n530 FOR J = LOW TO HIGH - 1\n540 IF A(J) <= PIVOT THEN GOSUB *INCSWAP\n550 NEXT\n560 I = I + 1\n570 T = A(I)\n580 A(I) = A(HIGH)\n590 A(HIGH) = T\n600 P = I\n610 RETURN\n700 *INCSWAP\n710 I = I + 1\n720 T = A(I)\n730 A(I) = A(J)\n740 A(J) = T\n750 RETURN\n800 *DRAWALL\n810 CLS 2\n820 FOR K = 0 TO N - 1\n830 V = A(K)\n840 BX = 30 + K * 6\n850 BY = 380 - V * 3\n860 LINE (BX,BY)-(BX,380),CYAN\n870 NEXT\n880 RETURN",
   };
 
   function openBasic(opts) {
@@ -1735,7 +1740,8 @@
       '<div class="basic-split">' +
       '<textarea class="basic-code" spellcheck="false"></textarea>' +
       '<div class="basic-right">' +
-      '<canvas id="basic-canvas" width="240" height="180"></canvas>' +
+      '<canvas id="basic-canvas" width="640" height="400" style="width:100%;height:auto"></canvas>' +
+      '<div class="basic-buttons"></div>' +
       '<div class="basic-output"></div>' +
       '</div></div>';
 
@@ -1754,9 +1760,11 @@
     code.value = SAMPLES.Hello;
     samp.addEventListener('change', () => { code.value = SAMPLES[samp.value]; });
 
+    const btnHost = node.querySelector('.basic-buttons');
     const basic = makeBasic(
       (s) => { outEl.textContent += s; outEl.scrollTop = outEl.scrollHeight; },
-      canvas
+      canvas,
+      btnHost
     );
 
     node.querySelector('.basic-toolbar').addEventListener('click', (e) => {
@@ -2348,9 +2356,29 @@
   }
 
   // ---- Tiny BASIC interpreter (graphics-capable) -----------------------
-  function makeBasic(print, canvas) {
+  function makeBasic(print, canvas, btnHost) {
     const ctx = canvas.getContext('2d');
     const COLORS = ['#9ece6a', '#f7768e', '#7aa2f7', '#e0af68', '#bb9af7', '#7dcfff', '#ffffff'];
+    // named colours used by the kernel BASIC dialect (LINE/CIRCLE ...,NAME)
+    const NAMED = { BLACK: '#000000', WHITE: '#ffffff', RED: '#f7768e', GREEN: '#9ece6a',
+      BLUE: '#7aa2f7', YELLOW: '#e0af68', CYAN: '#7dcfff', MAGENTA: '#bb9af7',
+      PURPLE: '#bb9af7', ORANGE: '#ff9e64', GRAY: '#8a8a8a', GREY: '#8a8a8a' };
+    function colorFor(tok) {
+      if (tok == null) return null;
+      tok = String(tok).trim();
+      if (tok === '') return null;
+      const up = tok.toUpperCase();
+      if (up in NAMED) return NAMED[up];
+      const n = parseFloat(tok);
+      if (!isNaN(n)) return COLORS[(n | 0) % COLORS.length] || COLORS[0];
+      return null;
+    }
+    // return [innerOfFirstBalancedParenGroup, restAfterIt]; handles nested parens
+    function splitParen(s) {
+      let depth = 0, i = 0;
+      for (; i < s.length; i++) { const c = s[i]; if (c === '(') depth++; else if (c === ')') { depth--; if (depth === 0) { i++; break; } } }
+      return [s.slice(1, i - 1), s.slice(i)];
+    }
 
     let gen = 0; // generation token: bumping it stops any in-flight run()
     function stop() { gen++; }
@@ -2360,6 +2388,7 @@
     const FUNCS = {
       INT: Math.floor, ABS: Math.abs, SQR: Math.sqrt, SIN: Math.sin, COS: Math.cos,
       TAN: Math.tan, ATN: Math.atan, SGN: Math.sign, RND: (n) => Math.floor(Math.random() * (n || 1)),
+      'STR$': (n) => toStr(n),
     };
     const FUNCS0 = { RND: () => Math.random(), PI: () => Math.PI };
 
@@ -2387,27 +2416,68 @@
       const myGen = ++gen; // supersedes any previous run (e.g. a running animation)
       const prog = parseProgram(src);
       const idxOf = {};
-      prog.forEach((l, i) => { idxOf[l.ln] = i; });
+      const labelOf = {};
+      prog.forEach((l, i) => {
+        idxOf[l.ln] = i;
+        const ml = l.src.match(/^\*([A-Za-z_][A-Za-z0-9_]*)/);
+        if (ml) labelOf['*' + ml[1].toUpperCase()] = i;
+      });
       const vars = {};
+      const arrays = {};
       let color = COLORS[0];
-      const forStack = [];
-      const subStack = [];
-      let pc = 0;
+      let M = { pc: 0, sub: [], fors: [] }; // active machine (mutated by GOSUB/RETURN/FOR)
       let steps = 0;
+      const buttons = {};
+      if (btnHost) btnHost.innerHTML = '';
 
       function err(msg) { print('?' + msg + '\n'); throw { halt: true }; }
 
+      function resolveTarget(t) {
+        t = String(t).trim();
+        if (t[0] === '*') { const k = '*' + t.slice(1).toUpperCase(); if (!(k in labelOf)) err('UNDEF LABEL ' + t); return labelOf[k]; }
+        const n = evalExpr(t) | 0; if (!(n in idxOf)) err('UNDEF LINE ' + n); return idxOf[n];
+      }
+
+      // Run the subroutine at index idx to its matching RETURN, on a fresh
+      // machine that shares vars/arrays/colour with the main program. Used by
+      // BUTTON click handlers (koch) so the idle main loop is not disturbed.
+      async function callSub(idx) {
+        const saved = M;
+        M = { pc: idx, sub: [prog.length], fors: [] };
+        let guard = 0;
+        try {
+          while (M.pc < prog.length) {
+            if (myGen !== gen) break;
+            if (++guard > 500000) { err('SUB TOO LONG'); break; }
+            const line = prog[M.pc];
+            const jumped = await execLine(line.src, line.ln);
+            if (!jumped) M.pc++;
+          }
+        } finally { M = saved; }
+      }
+
+      function setButton(id, label, target) {
+        if (!btnHost) return;
+        let b = buttons[id];
+        if (!b) { b = document.createElement('button'); b.className = 'basic-btn'; btnHost.appendChild(b); buttons[id] = b; }
+        b.textContent = label;
+        if (target != null && String(target).trim() !== '') {
+          b.disabled = false;
+          b.onclick = async () => { try { await callSub(resolveTarget(target)); } catch (e) { /* halted */ } };
+        } else { b.disabled = true; b.onclick = null; }
+      }
+
       try {
-        while (pc < prog.length) {
+        while (M.pc < prog.length) {
           if (myGen !== gen) return; // stopped or superseded by a newer run
-          if (++steps > 300000) err('TOO MANY STEPS (use PAUSE in animation loops)');
-          const line = prog[pc];
+          if (++steps > 300000) err('TOO MANY STEPS (use PAUSE/WAIT in animation loops)');
+          const line = prog[M.pc];
           const jumped = await execLine(line.src, line.ln);
-          if (!jumped) pc++;
+          if (!jumped) M.pc++;
         }
       } catch (e) { if (!e || !e.halt) print('?ERROR ' + (e && e.message ? e.message : e) + '\n'); }
 
-      // returns true if a jump changed pc
+      // returns true if a jump changed the program counter
       async function execLine(text, ln) {
         const stmts = splitTop(text, ':');
         for (let s = 0; s < stmts.length; s++) {
@@ -2419,28 +2489,79 @@
 
       async function execStmt(st, ln) {
         if (!st) return false;
+        if (st[0] === '*') return false; // label line (e.g. "*FRAME") — no-op
         const up = st.toUpperCase();
         let kw = (up.match(/^[A-Z]+/) || [''])[0];
 
         if (kw === 'REM') return false;
-        if (kw === 'END' || kw === 'STOP') { pc = prog.length; return true; }
+        if (kw === 'END' || kw === 'STOP') { M.pc = prog.length; return true; }
         if (kw === 'PRINT' || st[0] === '?') { doPrint(st.replace(/^\s*(PRINT|\?)/i, '')); return false; }
-        if (kw === 'CLS') { clearScreen(); return false; }
-        if (kw === 'COLOR') { color = COLORS[(evalExpr(st.slice(5)) | 0) % COLORS.length] || COLORS[0]; return false; }
+        if (kw === 'CLS') { clearScreen(); return false; } // ignores optional colour arg (CLS n)
+        if (kw === 'COLOR') { color = colorFor(st.slice(5)) || COLORS[(evalExpr(st.slice(5)) | 0) % COLORS.length] || COLORS[0]; return false; }
         if (kw === 'PLOT') { const a = args(st.slice(4)); ctx.fillStyle = color; ctx.fillRect(a[0] | 0, a[1] | 0, 2, 2); return false; }
-        if (kw === 'LINE') { const a = args(st.slice(4)); ctx.strokeStyle = color; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(a[2], a[3]); ctx.stroke(); return false; }
-        if (kw === 'CIRCLE') { const a = args(st.slice(6)); ctx.strokeStyle = color; ctx.beginPath(); ctx.arc(a[0], a[1], a[2], 0, 7); ctx.stroke(); return false; }
-        if (kw === 'PAUSE' || kw === 'WAIT') { await sleep(evalExpr(st.slice(kw.length)) || 0); steps = 0; return false; }
+        if (kw === 'LINE') { doLine(st.slice(4)); return false; }
+        if (kw === 'CIRCLE') { doCircle(st.slice(6)); return false; }
+        if (kw === 'PAUSE' || kw === 'WAIT') { const a = st.slice(kw.length).trim(); let ms; if (kw === 'WAIT') ms = a === '' ? 600 : (evalExpr(a) || 0) * 1000; else ms = evalExpr(a) || 0; await sleep(ms); steps = 0; return false; }
         if (kw === 'INPUT') { doInput(st.slice(5)); return false; }
-        if (kw === 'GOTO') { const t = evalExpr(st.slice(4)) | 0; if (!(t in idxOf)) err('UNDEF LINE ' + t); pc = idxOf[t]; return true; }
-        if (kw === 'GOSUB') { const t = evalExpr(st.slice(5)) | 0; if (!(t in idxOf)) err('UNDEF LINE ' + t); subStack.push(pc + 1); pc = idxOf[t]; return true; }
-        if (kw === 'RETURN') { if (!subStack.length) err('RETURN WITHOUT GOSUB'); pc = subStack.pop(); return true; }
+        if (kw === 'DIM') { doDim(st.slice(3)); return false; }
+        if (kw === 'BUTTON') { doButton(st.slice(6)); return false; }
+        if (kw === 'GOTO') { M.pc = resolveTarget(st.slice(4)); return true; }
+        if (kw === 'GOSUB') { M.sub.push(M.pc + 1); M.pc = resolveTarget(st.slice(5)); return true; }
+        if (kw === 'RETURN') { if (!M.sub.length) err('RETURN WITHOUT GOSUB'); M.pc = M.sub.pop(); return true; }
         if (kw === 'FOR') return doFor(st.slice(3));
         if (kw === 'NEXT') return doNext(st.slice(4));
         if (kw === 'IF') return await doIf(st.slice(2), ln);
         if (kw === 'LET') { doAssign(st.slice(3)); return false; }
+        if (/^[A-Za-z][A-Za-z0-9]*\s*\([^=]*\)\s*=/.test(st)) { doAssign(st); return false; } // array element
         if (/^[A-Za-z][A-Za-z0-9]*\$?\s*=/.test(st)) { doAssign(st); return false; }
         err('SYNTAX: ' + st);
+      }
+
+      function doLine(rest) {
+        rest = rest.trim();
+        if (rest[0] === '(') {
+          const g1 = splitParen(rest);
+          let r = g1[1].trim(); if (r[0] === '-') r = r.slice(1).trim();
+          const g2 = splitParen(r);
+          const p1 = splitTop(g1[0], ',');
+          const p2 = splitTop(g2[0], ',');
+          const cm = g2[1].replace(/^\s*,/, '').trim();
+          ctx.strokeStyle = colorFor(cm) || color;
+          ctx.beginPath(); ctx.moveTo(evalExpr(p1[0]), evalExpr(p1[1])); ctx.lineTo(evalExpr(p2[0]), evalExpr(p2[1])); ctx.stroke();
+          return;
+        }
+        const a = args(rest); ctx.strokeStyle = color; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(a[2], a[3]); ctx.stroke();
+      }
+
+      function doCircle(rest) {
+        rest = rest.trim();
+        if (rest[0] === '(') {
+          const g = splitParen(rest);
+          const p = splitTop(g[0], ',');
+          const tail = splitTop(g[1].replace(/^\s*,/, ''), ',');
+          const rad = evalExpr(tail[0]);
+          ctx.strokeStyle = colorFor(tail[1]) || color;
+          ctx.beginPath(); ctx.arc(evalExpr(p[0]), evalExpr(p[1]), rad, 0, 7); ctx.stroke();
+          return;
+        }
+        const a = args(rest); ctx.strokeStyle = color; ctx.beginPath(); ctx.arc(a[0], a[1], a[2], 0, 7); ctx.stroke();
+      }
+
+      function doDim(s) {
+        splitTop(s, ',').forEach((decl) => {
+          const m = decl.trim().match(/^([A-Za-z][A-Za-z0-9]*)\s*\((.+)\)$/);
+          if (!m) return;
+          const n = (evalExpr(m[2]) | 0) + 1; // BASIC DIM a(N) => indices 0..N
+          arrays[m[1]] = new Array(Math.max(1, n)).fill(0);
+        });
+      }
+
+      function doButton(s) {
+        const parts = splitTop(s, ',');
+        const id = evalExpr(parts[0]) | 0;
+        const label = toStr(evalExpr(parts[1] || '""'));
+        const target = parts.length >= 3 ? parts.slice(2).join(',') : null;
+        setButton(id, label, target);
       }
 
       function doPrint(rest) {
@@ -2452,7 +2573,6 @@
         for (let i = 0; i < parts.length; i++) {
           const seg = parts[i];
           if (seg.sep) { trailing = true; if (seg.token === ',') line += '\t'; continue; }
-          // Skip synthetic empty text segments (e.g. after a trailing ';').
           if (seg.text.trim() === '') continue;
           trailing = false;
           line += toStr(evalExpr(seg.text));
@@ -2474,9 +2594,11 @@
 
       function doAssign(s) {
         const eq = s.indexOf('=');
-        const name = s.slice(0, eq).trim();
+        const lhs = s.slice(0, eq).trim();
         const val = evalExpr(s.slice(eq + 1));
-        vars[name] = val;
+        const am = lhs.match(/^([A-Za-z][A-Za-z0-9]*)\s*\((.+)\)$/);
+        if (am) { const nm = am[1]; const idx = evalExpr(am[2]) | 0; if (!arrays[nm]) arrays[nm] = []; arrays[nm][idx] = val; return; }
+        vars[lhs] = val;
       }
 
       function doFor(s) {
@@ -2489,17 +2611,17 @@
         const limit = evalExpr(rest.slice(toM + 4, stepM >= 0 ? stepM : undefined));
         const step = stepM >= 0 ? evalExpr(rest.slice(stepM + 6)) : 1;
         vars[name] = start;
-        forStack.push({ name, limit, step, bodyPc: pc + 1 });
+        M.fors.push({ name, limit, step, bodyPc: M.pc + 1 });
         return false;
       }
 
       function doNext(s) {
-        if (!forStack.length) err('NEXT WITHOUT FOR');
-        const f = forStack[forStack.length - 1];
+        if (!M.fors.length) err('NEXT WITHOUT FOR');
+        const f = M.fors[M.fors.length - 1];
         vars[f.name] += f.step;
         const cont = f.step >= 0 ? vars[f.name] <= f.limit : vars[f.name] >= f.limit;
-        if (cont) { pc = f.bodyPc; return true; }
-        forStack.pop();
+        if (cont) { M.pc = f.bodyPc; return true; }
+        M.fors.pop();
         return false;
       }
 
@@ -2509,7 +2631,8 @@
         const cond = evalExpr(s.slice(0, thenM));
         if (cond) {
           const after = s.slice(thenM + 4).trim();
-          if (/^\d+$/.test(after)) { const t = parseInt(after, 10); if (!(t in idxOf)) err('UNDEF LINE ' + t); pc = idxOf[t]; return true; }
+          if (/^\d+$/.test(after)) { const t = parseInt(after, 10); if (!(t in idxOf)) err('UNDEF LINE ' + t); M.pc = idxOf[t]; return true; }
+          if (after[0] === '*') { M.pc = resolveTarget(after); return true; }
           return await execStmt(after, ln);
         }
         return false;
@@ -2558,7 +2681,11 @@
           if (p.s[p.i] === '$') { id += '$'; p.i++; }
           const fn = id.toUpperCase();
           ws(p);
-          if (p.s[p.i] === '(' && FUNCS[fn]) { p.i++; const arg = parseCmp(p); ws(p); if (p.s[p.i] === ')') p.i++; return FUNCS[fn](arg); }
+          if (p.s[p.i] === '(') {
+            if (FUNCS[fn]) { p.i++; const arg = parseCmp(p); ws(p); if (p.s[p.i] === ')') p.i++; return FUNCS[fn](arg); }
+            p.i++; const idx = parseCmp(p) | 0; ws(p); if (p.s[p.i] === ')') p.i++; // array element read
+            const arr = arrays[id]; return arr ? (arr[idx] || 0) : 0;
+          }
           if (FUNCS0[fn]) return FUNCS0[fn]();
           return id in vars ? vars[id] : 0;
         }

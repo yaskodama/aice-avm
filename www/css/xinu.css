@@ -106,6 +106,14 @@
 }
 .basic-right { width: 260px; display: flex; flex-direction: column; gap: 6px; }
 #basic-canvas { background: #000; border: 1px solid #2b3650; border-radius: 7px; width: 100%; image-rendering: pixelated; }
+.basic-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
+.basic-buttons:empty { display: none; }
+.basic-btn {
+  background: #1a2233; color: #cdd6f4; border: 1px solid #2b3650;
+  border-radius: 6px; padding: 2px 8px; font-family: inherit; font-size: 11px; cursor: pointer;
+}
+.basic-btn:hover { border-color: #5eb1ff; color: #fff; }
+.basic-btn:disabled { opacity: 0.85; cursor: default; border-color: #2b3650; }
 .basic-output {
   flex: 1; overflow: auto; background: #070b12; border: 1px solid #2b3650; border-radius: 7px;
   padding: 6px 8px; font-size: 12px; white-space: pre-wrap; color: #9ece6a; min-height: 60px;
