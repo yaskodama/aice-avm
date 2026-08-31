@@ -291,9 +291,20 @@ let parse_program src =
          合成したクラス __Top の tick に包む。この VM は「クラス 0 を spawn して
          tick を送る」約束なので、__Top を先頭に置けばそのまま起点になる。
          トップレベルの var は tick のメソッド局所 var として扱う。 *)
+      (* トップレベルの var は __Top の「フィールド」にする（局所にしない）。
+         こうすると名前が書き換わらないので、他クラスへ配るときにそのまま押せる。
+         宣言は代入に落とす。 *)
       let body = Block ts in
-      { cn = "__Top"; fields = []; finits = [];
-        meths = [ { mn = "tick"; params = []; body; mlocals = stmt_locals body } ] } :: classes
+      let gs = stmt_locals body in
+      let rec decl2assign = function
+        | LocalDecl (v, Some e) when List.mem v gs -> Assign (v, e)
+        | LocalDecl (v, None) when List.mem v gs -> Nop
+        | Block ss -> Block (List.map decl2assign ss)
+        | If (c, t, f) -> If (c, decl2assign t, decl2assign f)
+        | While (c, b) -> While (c, decl2assign b)
+        | s -> s in
+      { cn = "__Top"; fields = gs; finits = [];
+        meths = [ { mn = "tick"; params = []; body = decl2assign body; mlocals = [] } ] } :: classes
 
 (* ===== Codegen (mirrors avm_gen.ml) ===== *)
 let binop_code = function
@@ -309,6 +320,8 @@ let sid s = match Hashtbl.find_opt strs s with
 
 let class_index : (string, int) Hashtbl.t = Hashtbl.create 8
 let class_has_finit : (string, unit) Hashtbl.t = Hashtbl.create 8
+(* クラス名 -> そのクラスが要る大域変数の名前。new の直後に __setg で配る *)
+let class_globals : (string, string list) Hashtbl.t = Hashtbl.create 8
 let idx_of name lst =
   let rec go i = function [] -> None | x :: _ when x = name -> Some i | _ :: t -> go (i+1) t in go 0 lst
 
@@ -336,6 +349,12 @@ let compile_method ~fields ~params (body : stmt) : string =
   let rec ce = function
     | Int n -> u8 0x01; i32 n
     | Var n -> resolve n
+    | Bin (op, a, c) when has_string (Bin (op, a, c)) ->
+        (* 文字列の連結は print の書式として組み立て時に解決している。
+           実行時に新しい文字列を作る場所が無い（文字列ヒープが無い）ので、
+           print の外での連結は黙って整数加算にせず、ここで落とす。 *)
+        ignore op; ignore a; ignore c;
+        failwith "avm: 文字列の連結は print(...) の中だけ。実行時に文字列を組み立てて渡す/返すには文字列ヒープが要る（この VM には無い）"
     | Bin (op, a, c) -> ce a; ce c; u8 (binop_code op)
     | New (cls, args) ->
         (match Hashtbl.find_opt class_index cls with
@@ -344,6 +363,12 @@ let compile_method ~fields ~params (body : stmt) : string =
                 呼び出し側が続けて送るメッセージより必ず先に走る。 *)
              (if Hashtbl.mem class_has_finit cls then
                 (u8 0x08; u8 0x40; u16 (sid "__finit"); u8 0));
+             (* 大域を要るクラスなら、生成直後に __setg で配る *)
+             (match Hashtbl.find_opt class_globals cls with
+              | None -> ()
+              | Some gs ->
+                  u8 0x08; List.iter (fun g -> ce (Var g)) gs;
+                  u8 0x40; u16 (sid "__setg"); u8 (List.length gs));
              (match args with [] -> () | _ ->
                 u8 0x08; List.iter ce args; u8 0x40; u16 (sid "init"); u8 (List.length args))
          | None -> failwith ("avm: new of unknown class '" ^ cls ^ "'"))
@@ -582,9 +607,61 @@ let prepare_class (c : cls) : cls =
     { c with fields = c.fields @ hidden @ ["__k"]; meths = ms }
   end
 
+(* ===== 大域変数（トップレベルの var）を、参照するクラスへ配る =====
+   この VM に大域は無いので、参照するクラスに同名のフィールドを足し、
+   __Top が new した直後に __setg で送り込む。
+   new が __Top の外にある場合は、そこに大域が見えないので
+   codegen が "unknown variable" で落ちる＝黙って動かない形にはならない。 *)
+let rec fv_e acc = function
+  | Var v -> v :: acc
+  | Bin (_, a, b) -> fv_e (fv_e acc a) b
+  | New (_, args) | Call (_, args) -> List.fold_left fv_e acc args
+  | Now (t, _, args, tk) ->
+      let acc = List.fold_left fv_e (t :: acc) args in
+      (match tk with Some (a, b) -> fv_e (fv_e acc a) b | None -> acc)
+  | Future (t, _, args) -> List.fold_left fv_e (t :: acc) args
+  | Await (h, tk) ->
+      let acc = fv_e acc h in
+      (match tk with Some (a, b) -> fv_e (fv_e acc a) b | None -> acc)
+  | _ -> acc
+let rec fv_s acc = function
+  | Assign (n, e) -> fv_e (n :: acc) e
+  | LocalDecl (_, Some e) -> fv_e acc e
+  | If (c, t, f) -> fv_s (fv_s (fv_e acc c) t) f
+  | While (c, b) -> fv_s (fv_e acc c) b
+  | Block ss -> List.fold_left fv_s acc ss
+  | Send (t, _, args) -> List.fold_left fv_e (t :: acc) args
+  | CallS (_, args) -> List.fold_left fv_e acc args
+  | _ -> acc
+
+let distribute_globals (classes : cls list) : cls list =
+  match List.find_opt (fun c -> c.cn = "__Top") classes with
+  | None -> classes
+  | Some top ->
+    let gs = top.fields in
+    if gs = [] then classes
+    else List.map (fun c ->
+      if c.cn = "__Top" then c
+      else begin
+        let bound = c.fields @ List.concat_map (fun m -> m.mn :: m.params @ m.mlocals) c.meths
+                    @ ["self"; "sender"] in
+        let used = List.concat_map (fun m -> fv_s [] m.body) c.meths in
+        let need = List.filter (fun g -> List.mem g used && not (List.mem g bound)) gs in
+        if need = [] then c
+        else begin
+          Hashtbl.replace class_globals c.cn need;
+          { c with fields = c.fields @ need;
+                   meths = c.meths @
+                     [ { mn = "__setg"; params = List.map (fun g -> "__g_" ^ g) need;
+                         mlocals = [];
+                         body = Block (List.map (fun g -> Assign (g, Var ("__g_" ^ g))) need) } ] }
+        end
+      end) classes
+
 let gen_program (classes : cls list) : bytes =
   Hashtbl.reset strs; str_rev := []; str_n := 0; Hashtbl.reset class_index;
-  Hashtbl.reset class_has_finit;
+  Hashtbl.reset class_has_finit; Hashtbl.reset class_globals;
+  let classes = distribute_globals classes in
   List.iter (fun c -> if c.finits <> [] then Hashtbl.replace class_has_finit c.cn ()) classes;
   let classes = List.map prepare_class classes in
   (* timeout を使ったクラスがあれば、待ち役の __Timer を足す。
