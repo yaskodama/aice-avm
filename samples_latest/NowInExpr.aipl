@@ -1,0 +1,13 @@
+class Counter {
+  var n = 10;
+  method bump() : int !{mut} { n = n + 1; reply(n); }
+}
+class Driver {
+  var c = 0;
+  method run() : unit !{mut} {
+    c = new Counter();
+    print(now c.bump());              // 式の中の now（持ち上げ対象）
+  }
+}
+var d = new Driver();
+send d.run();

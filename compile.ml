@@ -410,6 +410,43 @@ let rec ren_s f = function
   | CallS (g, args) -> CallS (g, List.map (ren_e f) args)
   | Nop -> Nop
 
+(* 式の中に現れた now を、直前の一時変数へ持ち上げる。
+     print(now c.bump())  ->  var __nw1 = now c.bump(); print(__nw1);
+   こうしておけば、あとは既存の「文の位置の now」の分割がそのまま使える。
+   while の条件だけは持ち上げない（毎周回で分割が要るため）。持ち上げなかった
+   now は codegen が明示的にエラーにする。 *)
+let hoist_now (ctr : int ref) (ss : stmt list) : stmt list * string list =
+  let temps = ref [] in
+  let pre = ref [] in
+  let rec go = function
+    | Now (t, m, args) ->
+        let args = List.map go args in
+        incr ctr;
+        let tv = Printf.sprintf "__nw%d" !ctr in
+        temps := tv :: !temps;
+        pre := LocalDecl (tv, Some (Now (t, m, args))) :: !pre;
+        Var tv
+    | Bin (o, a, b) -> let a = go a in let b = go b in Bin (o, a, b)
+    | New (c, args) -> New (c, List.map go args)
+    | Call (g, args) -> Call (g, List.map go args)
+    | x -> x
+  in
+  let flush s acc = (s :: List.rev_append !pre acc) in
+  let out =
+    List.fold_left (fun acc s ->
+      pre := [];
+      match s with
+      (* 既に「文の位置の now」なら触らない *)
+      | LocalDecl (_, Some (Now _)) | Assign (_, Now _) -> s :: acc
+      | Assign (n, e)          -> let e = go e in flush (Assign (n, e)) acc
+      | LocalDecl (v, Some e)  -> let e = go e in flush (LocalDecl (v, Some e)) acc
+      | Send (t, m, args)      -> let a = List.map go args in flush (Send (t, m, a)) acc
+      | CallS (g, args)        -> let a = List.map go args in flush (CallS (g, a)) acc
+      | If (c, t, f)           -> let c = go c in flush (If (c, t, f)) acc
+      | _ -> s :: acc) [] ss
+  in
+  (List.rev out, List.rev !temps)
+
 let split_at_now ss =
   let rec go acc = function
     | [] -> (List.rev acc, None)
@@ -419,6 +456,12 @@ let split_at_now ss =
   in go [] ss
 
 let prepare_class (c : cls) : cls =
+  (* 0) 式の中の now を一時変数へ持ち上げる *)
+  let tctr = ref 0 in
+  let c = { c with meths = List.map (fun m ->
+      let ss = match m.body with Block ss -> ss | s -> [s] in
+      let (ss, tmps) = hoist_now tctr ss in
+      { m with body = Block ss; mlocals = m.mlocals @ tmps }) c.meths } in
   let ms = List.map (fun m ->
       let f v = if List.mem v m.mlocals then m.mn ^ "#" ^ v else v in
       { m with body = ren_s f m.body;
