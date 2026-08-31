@@ -1,0 +1,17 @@
+class Slow {
+  var n = 0;
+  method work(k: int) : int !{mut} { wait(300); n = k * 2; reply(n); }
+  method fast(k: int) : int !{mut} { n = k * 2; reply(n); }
+}
+class Drv {
+  var s = 0;
+  method go() : unit !{mut} {
+    s = new Slow();
+    var a = now s.fast(21) timeout 1000 else 0;
+    print("fast = " ++ a);
+    var b = now s.work(21) timeout 50 else 999;
+    print("slow = " ++ b);
+  }
+}
+var d = new Drv();
+send d.go();

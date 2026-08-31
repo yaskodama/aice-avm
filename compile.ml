@@ -13,7 +13,8 @@
 (* ===== AST ===== *)
 type expr = Int of int | Var of string | Str of string
           | Bin of string * expr * expr | New of string * expr list | Call of string * expr list
-          | Now of string * string * expr list   (* now t.m(args) — 継続分割で実現する *)
+          | Now of string * string * expr list * (expr * expr) option
+            (* now t.m(args) [timeout ms else v] — 継続分割で実現する *)
 type stmt = Assign of string * expr | If of expr * stmt * stmt | While of expr * stmt
           | Block of stmt list | Send of string * string * expr list
           | CallS of string * expr list | Nop
@@ -114,7 +115,14 @@ and parse_primary () =
   | TID "new" -> let c = id () in expect LP; let a = parse_args () in expect RP; New (c, a)
   | TID "now" ->
       let t = id () in expect DOT; let m = id () in
-      expect LP; let a = parse_args () in expect RP; Now (t, m, a)
+      expect LP; let a = parse_args () in expect RP;
+      if peek () = TID "timeout" then begin
+        ignore (advance ());
+        let ms = parse_add () in            (* 比較より内側で切る（else まで食わないように） *)
+        (if peek () = TID "else" then ignore (advance ()) else failwith "parse: timeout には else が要る");
+        let dflt = parse_add () in
+        Now (t, m, a, Some (ms, dflt))
+      end else Now (t, m, a, None)
   | TID "self" -> Var "self"
   | TID "sender" -> Var "sender"
   | TID x -> if peek () = LP then (ignore (advance ()); let a = parse_args () in expect RP; Call (x, a)) else Var x
@@ -397,7 +405,8 @@ let rec ren_e f = function
   | Bin (o, a, b) -> Bin (o, ren_e f a, ren_e f b)
   | New (c, args) -> New (c, List.map (ren_e f) args)
   | Call (g, args) -> Call (g, List.map (ren_e f) args)
-  | Now (t, m, args) -> Now (f t, m, List.map (ren_e f) args)
+  | Now (t, m, args, tk) -> Now (f t, m, List.map (ren_e f) args,
+                                Option.map (fun (a,b) -> (ren_e f a, ren_e f b)) tk)
   | e -> e
 
 let rec ren_s f = function
@@ -419,12 +428,12 @@ let hoist_now (ctr : int ref) (ss : stmt list) : stmt list * string list =
   let temps = ref [] in
   let pre = ref [] in
   let rec go = function
-    | Now (t, m, args) ->
+    | Now (t, m, args, tk) ->
         let args = List.map go args in
         incr ctr;
         let tv = Printf.sprintf "__nw%d" !ctr in
         temps := tv :: !temps;
-        pre := LocalDecl (tv, Some (Now (t, m, args))) :: !pre;
+        pre := LocalDecl (tv, Some (Now (t, m, args, tk))) :: !pre;
         Var tv
     | Bin (o, a, b) -> let a = go a in let b = go b in Bin (o, a, b)
     | New (c, args) -> New (c, List.map go args)
@@ -450,8 +459,8 @@ let hoist_now (ctr : int ref) (ss : stmt list) : stmt list * string list =
 let split_at_now ss =
   let rec go acc = function
     | [] -> (List.rev acc, None)
-    | LocalDecl (x, Some (Now (t, mm, args))) :: rest -> (List.rev acc, Some (x, t, mm, args, rest))
-    | Assign (x, Now (t, mm, args)) :: rest        -> (List.rev acc, Some (x, t, mm, args, rest))
+    | LocalDecl (x, Some (Now (t, mm, args, tk))) :: rest -> (List.rev acc, Some (x, t, mm, args, tk, rest))
+    | Assign (x, Now (t, mm, args, tk)) :: rest          -> (List.rev acc, Some (x, t, mm, args, tk, rest))
     | s :: rest -> go (s :: acc) rest
   in go [] ss
 
@@ -466,36 +475,63 @@ let prepare_class (c : cls) : cls =
       let f v = if List.mem v m.mlocals then m.mn ^ "#" ^ v else v in
       { m with body = ren_s f m.body;
                mlocals = List.map (fun v -> m.mn ^ "#" ^ v) m.mlocals }) c.meths in
-  let kctr = ref 0 and entries = ref [] and uses = ref false in
-  let rec chop ss =
+  (* now の分割。timeout つきなら、別アクタ __Timer を立てて
+     「wait(ms) してから呼び出し元の __to(kid) を叩く」役をさせる。
+     この VM の wait は自分のアクタだけを止めるので、別アクタなら
+     呼び出し元は止まらない。返信とタイムアウトのどちらが先に来ても
+     __k を 0 に落とすので、後から来た方は無視される。 *)
+  let kctr = ref 0 and entries = ref [] and touts = ref []
+  and uses = ref false and extra = ref [] in
+  let rec chop owner ss =
     let (pre, k) = split_at_now ss in
     match k with
     | None -> Block pre
-    | Some (x, t, mm, args, rest) ->
+    | Some (x, t, mm, args, tk, rest) ->
         uses := true; incr kctr; let kid = !kctr in
-        let cont = chop rest in
+        let cont = chop owner rest in
         entries := (kid, x, cont) :: !entries;
-        Block (pre @ [ Assign ("__k", Int kid); Send (t, mm, args) ])
+        let setup =
+          match tk with
+          | None -> []
+          | Some (ms, dflt) ->
+              let tv = Printf.sprintf "%s#__tmr%d" owner kid in
+              extra := tv :: !extra;
+              touts := (kid, x, dflt, cont) :: !touts;
+              [ LocalDecl (tv, Some (New ("__Timer", [])));
+                Send (tv, "fire", [ ms; Var "self"; Int kid ]) ]
+        in
+        Block (pre @ [ Assign ("__k", Int kid) ] @ setup @ [ Send (t, mm, args) ])
   in
   let ms = List.map (fun m ->
       let ss = match m.body with Block ss -> ss | s -> [s] in
-      { m with body = chop ss }) ms in
-  (* フィールド初期値は合成メソッド __finit にまとめ、生成直後に送る（後述の New 参照）。
+      { m with body = chop m.mn ss }) ms in
+  (* フィールド初期値は合成メソッド __finit にまとめ、生成直後に送る（New 参照）。
      この VM には生成フックが無いので、これが初期値を効かせる唯一の道。 *)
   let ms = if c.finits = [] then ms
            else ms @ [ { mn = "__finit"; params = []; mlocals = [];
                          body = Block (List.map (fun (f, e) -> Assign (f, e)) c.finits) } ] in
-  let hidden = List.concat_map (fun m -> m.mlocals) ms in
+  let hidden = List.concat_map (fun m -> m.mlocals) ms @ List.rev !extra in
   if not !uses then { c with fields = c.fields @ hidden; meths = ms }
   else begin
     if List.exists (fun m -> m.mn = "reply") c.meths then
       failwith ("avm: クラス " ^ c.cn
                 ^ " は now を使っているので reply を自分で定義できない（継続の受け口に使うため）");
     let disp = Block (List.map (fun (kid, x, b) ->
-        If (Bin ("==", Var "__k", Int kid), Block [ Assign (x, Var "__v"); b ], Nop))
+        If (Bin ("==", Var "__k", Int kid),
+            Block [ Assign ("__k", Int 0); Assign (x, Var "__v"); b ], Nop))
         (List.rev !entries)) in
-    { c with fields = c.fields @ hidden @ ["__k"];
-             meths = ms @ [ { mn = "reply"; params = ["__v"]; body = disp; mlocals = [] } ] }
+    let ms = ms @ [ { mn = "reply"; params = ["__v"]; body = disp; mlocals = [] } ] in
+    let ms =
+      if !touts = [] then ms
+      else
+        let td = Block (List.map (fun (kid, x, dflt, b) ->
+            If (Bin ("==", Var "__tk", Int kid),
+                Block [ If (Bin ("==", Var "__k", Int kid),
+                            Block [ Assign ("__k", Int 0); Assign (x, dflt); b ], Nop) ], Nop))
+            (List.rev !touts)) in
+        ms @ [ { mn = "__to"; params = ["__tk"]; body = td; mlocals = [] } ]
+    in
+    { c with fields = c.fields @ hidden @ ["__k"]; meths = ms }
   end
 
 let gen_program (classes : cls list) : bytes =
@@ -503,6 +539,18 @@ let gen_program (classes : cls list) : bytes =
   Hashtbl.reset class_has_finit;
   List.iter (fun c -> if c.finits <> [] then Hashtbl.replace class_has_finit c.cn ()) classes;
   let classes = List.map prepare_class classes in
+  (* timeout を使ったクラスがあれば、待ち役の __Timer を足す。
+     wait は自分のアクタだけを止めるので、別アクタにやらせれば
+     呼び出し元は止まらずに返信を受け取れる。 *)
+  let needs_timer =
+    List.exists (fun c -> List.exists (fun m -> m.mn = "__to") c.meths) classes in
+  let classes =
+    if not needs_timer then classes
+    else classes @ [ { cn = "__Timer"; fields = []; finits = [];
+                       meths = [ { mn = "fire"; params = ["ms"; "back"; "k"]; mlocals = [];
+                                   body = Block [ CallS ("wait", [Var "ms"]);
+                                                  Send ("back", "__to", [Var "k"]) ] } ] } ]
+  in
   List.iteri (fun i c -> Hashtbl.replace class_index c.cn i) classes;
   let compiled = List.map (fun c ->
     let ms = List.map (fun m ->
