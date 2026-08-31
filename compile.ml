@@ -16,7 +16,9 @@ type expr = Int of int | Var of string | Str of string
 type stmt = Assign of string * expr | If of expr * stmt * stmt | While of expr * stmt
           | Block of stmt list | Send of string * string * expr list
           | CallS of string * expr list | Nop
-type meth = { mn : string; params : string list; body : stmt }
+          | LocalDecl of string * expr option   (* メソッド局所 var *)
+type meth = { mn : string; params : string list; body : stmt;
+              mlocals : string list }           (* このメソッドが宣言した局所名 *)
 type cls  = { cn : string; fields : string list; meths : meth list }
 
 (* ===== Lexer ===== *)
@@ -24,6 +26,7 @@ type tok = TINT of int | TID of string | TSTR of string
          | LB | RB | LP | RP | SEMI | COMMA | DOT
          | EQ2 | NE | LE | GE | LT | GT | ASSIGN
          | PLUS | MINUS | STAR | SLASH | PCT | EOF
+         | COLON | BANG | AT   (* 現行 AIPL の注釈用: `: T` / `!{...}` / `@ N` *)
 
 let lex (s : string) : tok array =
   let n = String.length s in
@@ -44,7 +47,13 @@ let lex (s : string) : tok array =
     end
     else if is_id0 c then begin
       let j = ref !i in while !j < n && is_idc s.[!j] do incr j done;
-      emit (TID (String.sub s !i (!j - !i))); i := !j
+      let w = String.sub s !i (!j - !i) in
+      (* 現行 AIPL の真偽値リテラル。AVM は真偽値を整数で持つ *)
+      (match w with
+       | "true"  -> emit (TINT 1)
+       | "false" -> emit (TINT 0)
+       | _       -> emit (TID w));
+      i := !j
     end
     else if c = '"' then begin
       let b = Buffer.create 16 in incr i;
@@ -63,6 +72,7 @@ let lex (s : string) : tok array =
     else begin
       let two = if !i + 1 < n then String.sub s !i 2 else "" in
       (match two with
+       | "++" -> emit PLUS; i := !i + 2   (* 文字列連結。ここでは + が連結を担う *)
        | "==" -> emit EQ2; i := !i + 2
        | "!=" -> emit NE;  i := !i + 2
        | "<=" -> emit LE;  i := !i + 2
@@ -74,6 +84,7 @@ let lex (s : string) : tok array =
           | '=' -> emit ASSIGN | '<' -> emit LT | '>' -> emit GT
           | '+' -> emit PLUS | '-' -> emit MINUS | '*' -> emit STAR
           | '/' -> emit SLASH | '%' -> emit PCT
+          | ':' -> emit COLON | '!' -> emit BANG | '@' -> emit AT
           | _ -> failwith (Printf.sprintf "lex: unexpected char '%c'" c));
          incr i)
     end
@@ -134,6 +145,10 @@ and parse_expr () =
     | _ -> l
   in go (parse_add ())
 
+(* `var x: int = 0;` の型注釈を読み飛ばす（parse_stmt から使うので先に置く） *)
+let skip_type_ann_stmt () =
+  if peek () = COLON then (ignore (advance ()); ignore (advance ()))
+
 let rec parse_stmt () =
   match peek () with
   | TID "if" ->
@@ -155,7 +170,12 @@ let rec parse_stmt () =
       ignore (advance ());
       while peek () <> SEMI && peek () <> EOF do ignore (advance ()) done;
       (if peek () = SEMI then ignore (advance ())); Nop
-  | TID "var" -> failwith "compile: method-local 'var' unsupported (use class fields)"
+  | TID "var" ->
+      (* メソッド局所 var。隠しフィールドに割り当てるので、この VM の命令だけで足りる。 *)
+      ignore (advance ()); let v = id () in
+      let init = if peek () = ASSIGN then (ignore (advance ()); Some (parse_expr ())) else None in
+      skip_type_ann_stmt ();
+      expect SEMI; LocalDecl (v, init)
   | LB ->
       ignore (advance ());
       let ss = ref [] in
@@ -169,11 +189,35 @@ let rec parse_stmt () =
        | _ -> failwith "parse: bad statement")
   | _ -> failwith "parse: bad statement"
 
+(* 現行 AIPL の注釈は AVM では意味を持たないので、構文として受理して読み飛ばす。
+   「黙って落とす」のではなく、読み飛ばしていることを関数名で明示しておく。 *)
+let skip_type_ann () =
+  if peek () = COLON then (ignore (advance ()); ignore (advance ()))   (* : T *)
+
+let skip_level_ann () =
+  if peek () = AT then (ignore (advance ()); ignore (advance ()))      (* @ N *)
+
+let skip_effect_ann () =
+  if peek () = BANG then begin                                        (* !{a, b} *)
+    ignore (advance ()); expect LB;
+    while peek () <> RB do ignore (advance ()) done;
+    ignore (advance ())
+  end
+
 let parse_params () =
   if peek () = RP then []
   else let rec go () = let p = id () in
+    skip_type_ann ();
     if peek () = COMMA then (ignore (advance ()); p :: go ()) else [p]
   in go ()
+
+(* 文の木から、その中で宣言された局所 var の名前を集める *)
+let rec stmt_locals = function
+  | LocalDecl (v, _) -> [v]
+  | Block ss -> List.concat_map stmt_locals ss
+  | If (_, t, f) -> stmt_locals t @ stmt_locals f
+  | While (_, b) -> stmt_locals b
+  | _ -> []
 
 let parse_class () =
   expect (TID "class"); let name = id () in expect LB;
@@ -187,21 +231,44 @@ let parse_class () =
     | TID "method" ->
         ignore (advance ()); let mn = id () in expect LP;
         let params = parse_params () in expect RP;
+        skip_type_ann (); skip_level_ann (); skip_effect_ann ();
         expect LB;
         let ss = ref [] in
         while peek () <> RB do ss := parse_stmt () :: !ss done;
         ignore (advance ());
-        meths := { mn; params; body = Block (List.rev !ss) } :: !meths
+        let body = Block (List.rev !ss) in
+        meths := { mn; params; body; mlocals = stmt_locals body } :: !meths
     | _ -> failwith "parse: expected var/method in class body"
   done;
   ignore (advance ());
-  { cn = name; fields = List.rev !fields; meths = List.rev !meths }
+  let ms = List.rev !meths in
+  (* 局所変数は "メソッド名#局所名" という隠しフィールドに割り当てる。
+     '#' は識別子に現れないので、ユーザのフィールドと衝突しない。
+     メソッド本体は最後まで一気に走る（send は非同期で途中で止まらない）ので、
+     アクタごとに 1 枠で足りる。 *)
+  let hidden = List.concat_map (fun m -> List.map (fun v -> m.mn ^ "#" ^ v) m.mlocals) ms in
+  { cn = name; fields = List.rev !fields @ hidden; meths = ms }
 
 let parse_program src =
   toks := lex src; pos := 0;
-  let cs = ref [] in
-  while peek () <> EOF do cs := parse_class () :: !cs done;
-  List.rev !cs
+  let cs = ref [] and tops = ref [] in
+  while peek () <> EOF do
+    if peek () = TID "class" then cs := parse_class () :: !cs
+    else tops := parse_stmt () :: !tops
+  done;
+  let classes = List.rev !cs in
+  match List.rev !tops with
+  | [] -> classes
+  | ts ->
+      (* クラスの外に書かれた文（`var g = new G(); send g.tick();` など）は、
+         合成したクラス __Top の tick に包む。この VM は「クラス 0 を spawn して
+         tick を送る」約束なので、__Top を先頭に置けばそのまま起点になる。
+         トップレベルの var は tick のメソッド局所 var として扱う。 *)
+      let body = Block ts in
+      let ml = stmt_locals body in
+      let hidden = List.map (fun v -> "tick#" ^ v) ml in
+      { cn = "__Top"; fields = hidden;
+        meths = [ { mn = "tick"; params = []; body; mlocals = ml } ] } :: classes
 
 (* ===== Codegen (mirrors avm_gen.ml) ===== *)
 let binop_code = function
@@ -219,7 +286,9 @@ let class_index : (string, int) Hashtbl.t = Hashtbl.create 8
 let idx_of name lst =
   let rec go i = function [] -> None | x :: _ when x = name -> Some i | _ :: t -> go (i+1) t in go 0 lst
 
-let compile_method ~fields ~params (body : stmt) : string =
+let compile_method ~fields ~params ~locals ~mname (body : stmt) : string =
+  let hid v = mname ^ "#" ^ v in
+  let is_local v = List.mem v locals in
   let b = Buffer.create 64 in
   let lbl = ref 0 in
   let new_label () = incr lbl; !lbl in
@@ -235,9 +304,12 @@ let compile_method ~fields ~params (body : stmt) : string =
     else if n = "sender" then u8 0x06
     else match idx_of n params with
       | Some i -> u8 0x04; u8 i
-      | None -> (match idx_of n fields with
-                 | Some i -> u8 0x02; u8 i
-                 | None -> failwith ("avm: unknown variable '" ^ n ^ "'")) in
+      | None ->
+        (* 局所変数はフィールドより先に見る（同名なら局所が勝つ） *)
+        let key = if is_local n then hid n else n in
+        (match idx_of key fields with
+         | Some i -> u8 0x02; u8 i
+         | None -> failwith ("avm: unknown variable '" ^ n ^ "'")) in
   let rec has_string = function Str _ -> true | Bin (_, a, c) -> has_string a || has_string c | _ -> false in
   let rec ce = function
     | Int n -> u8 0x01; i32 n
@@ -272,8 +344,13 @@ let compile_method ~fields ~params (body : stmt) : string =
     | Nop -> ()
     | Assign (n, e) ->
         ce e;
-        (match idx_of n fields with Some i -> u8 0x03; u8 i
+        let key = if is_local n then hid n else n in
+        (match idx_of key fields with Some i -> u8 0x03; u8 i
          | None -> failwith ("avm: assignment to non-field '" ^ n ^ "'"))
+    | LocalDecl (v, init) ->
+        (match init with Some e -> ce e | None -> u8 0x01; i32 0);
+        (match idx_of (hid v) fields with Some i -> u8 0x03; u8 i
+         | None -> failwith ("avm: local slot missing for '" ^ v ^ "'"))
     | If (c, t, f) ->
         ce c; let l_else = new_label () and l_end = new_label () in
         jump 0x31 l_else; cs t; jump 0x30 l_end; place l_else; cs f; place l_end
@@ -282,6 +359,11 @@ let compile_method ~fields ~params (body : stmt) : string =
         place l_top; ce c; jump 0x31 l_end; cs body; jump 0x30 l_top; place l_end
     | Send (tgt, m, args) ->
         resolve tgt; List.iter ce args; u8 0x40; u16 (sid m); u8 (List.length args)
+    | CallS ("reply", args) ->
+        (* この VM に future は無い。reply(v) は「送り主の reply メソッドへ送る」に落とす。
+           AIPL 本来の「呼び出し元へ値を返す」とは意味が異なる。呼ぶ側のクラスに
+           method reply(...) が必要。 *)
+        u8 0x06; List.iter ce args; u8 0x40; u16 (sid "reply"); u8 (List.length args)
     | CallS ("print", [a]) -> emit_print a
     | CallS ("wait", [ms]) -> ce ms; u8 0x07
     | CallS ("line", [x1;y1;x2;y2;col]) -> ce x1; ce y1; ce x2; ce y2; ce col; u8 0x45
@@ -303,7 +385,9 @@ let gen_program (classes : cls list) : bytes =
   List.iteri (fun i c -> Hashtbl.replace class_index c.cn i) classes;
   let compiled = List.map (fun c ->
     let ms = List.map (fun m ->
-      (sid m.mn, List.length m.params, compile_method ~fields:c.fields ~params:m.params m.body)) c.meths in
+      (sid m.mn, List.length m.params,
+       compile_method ~fields:c.fields ~params:m.params
+                      ~locals:m.mlocals ~mname:m.mn m.body)) c.meths in
     (sid c.cn, List.length c.fields, ms)) classes in
   let out = Buffer.create 256 in
   let u8 x = Buffer.add_char out (Char.chr (x land 0xff)) in

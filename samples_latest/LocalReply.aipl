@@ -1,0 +1,30 @@
+// LocalReply.aipl — メソッド局所 var と reply の実機確認（現行 AIPL の表層構文）
+class Main {
+  var w = 0;
+  var acc = 0;
+  method tick() : unit !{mut} {
+    w = new Worker();
+    send w.job(7);
+    send w.job(5);
+  }
+  // reply(v) は「送り主の reply メソッドへ送る」に落ちる
+  method reply(v: int) : unit !{mut} {
+    acc = acc + v;
+    print("Main got " ++ v ++ " acc=" ++ acc);
+  }
+}
+
+class Worker {
+  method job(n: int) : unit !{mut} {
+    var sum = 0;            // メソッド局所 var
+    var i   = 0;
+    var big = false;
+    while (i < n) do {
+      sum = sum + i;        // 0+1+..+(n-1)
+      i = i + 1;
+    }
+    if (sum > 15) { big = true; }
+    print("worker n=" ++ n ++ " sum=" ++ sum ++ " big=" ++ big);
+    reply(sum);             // → send sender.reply(sum)
+  }
+}

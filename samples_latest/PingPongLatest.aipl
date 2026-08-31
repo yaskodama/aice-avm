@@ -1,0 +1,41 @@
+// PingPongLatest.aipl — 現行 AIPL（2026-07-31 仕様）の表層構文で書いた AVM 版。
+// 使っている現行構文: 戻り値注釈 `: unit` / 効果注釈 `!{mut}` /
+//                    真偽値リテラル true・false / 文字列連結 ++ / 仮引数の型注釈 `n: int`
+// AVM 部分集合の制約: メソッド局所 var 不可、reply/now/await/select 不可。
+class Main {
+  var p = 0;
+  var q = 0;
+  method tick() : unit !{mut} {
+    q = new Ponger();
+    p = new Pinger();
+    send p.setq(q);
+    send q.setp(p);
+    send p.serve(6);
+  }
+}
+
+class Pinger {
+  var peer    = 0;
+  var left    = 0;
+  var started = false;
+  method setq(x) : unit !{mut} { peer = x; }
+  method serve(n: int) : unit !{mut} {
+    started = true;
+    left = n;
+    send peer.ping(left);
+  }
+  method pong(n: int) : unit !{mut} {
+    print("pong " ++ n);
+    left = left - 1;
+    if (left > 0) { send peer.ping(left); }
+  }
+}
+
+class Ponger {
+  var peer = 0;
+  method setp(x) : unit !{mut} { peer = x; }
+  method ping(n: int) : unit !{mut} {
+    print("ping " ++ n);
+    send peer.pong(n);
+  }
+}

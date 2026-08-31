@@ -1,0 +1,37 @@
+// TopLevel.aipl — クラスの外に書いた文（トップレベル文）の実機確認。
+// 現行 AIPL の書き方そのままで、合成クラス __Top の tick に包まれる。
+class Greeter {
+  var count = 0;
+  method tick() : unit !{mut} {
+    count = count + 1;
+    print("tick " ++ count);
+  }
+}
+
+class Adder {
+  method sum(n: int) : unit !{mut} {
+    var acc = 0;              // メソッド局所 var
+    var i   = 0;
+    while (i <= n) do { acc = acc + i; i = i + 1; }
+    print("sum(" ++ n ++ ") = " ++ acc);
+    reply(acc);               // 送り主の reply へ
+  }
+}
+
+class Sink {
+  var got = 0;
+  method kick(w) : unit !{mut} { send w.sum(10); }
+  method reply(v: int) : unit !{mut} {
+    got = v;
+    print("sink got " ++ got);
+  }
+}
+
+// ---- ここからトップレベル（クラスの外） ----
+var g = new Greeter();
+send g.tick();
+send g.tick();
+
+var s = new Sink();
+var a = new Adder();
+send s.kick(a);
