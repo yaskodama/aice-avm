@@ -1,0 +1,18 @@
+// g5: 外部公開すると戻り値型注釈が必須になる
+//     web_listen で境界が開き、POST /api/send で任意のアクターに到達できる。
+//     公開先の本体は相手から見えないので、返信の型は宣言でしか伝わらない。
+class Echo {
+  method say(msg) : string {   // 注釈が無いと型エラーになる
+    reply("echo: " ++ msg);
+  }
+  method note(msg) : unit {
+    print("[note] " ++ msg);
+  }
+}
+
+var echo = new Echo();
+
+web_listen(8080);
+web_expose("/echo", "echo");
+
+print("POST /api/x/echo に method=say&args=hi を送ってみてください");

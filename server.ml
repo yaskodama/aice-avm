@@ -839,6 +839,24 @@ let handle rt fd =
                         (String.length body) (Bytes.length avm) id)
          with e -> http_text (Printf.sprintf "loadsrc-error: %s\r\n" (Printexc.to_string e)))
       end
+      (* web_expose で公開したアクタを叩く:
+           POST/GET /api/x/<パス>?method=say&args=hi
+         パスは web_expose("/echo", "echo") の第1引数。返信は本文で返す。 *)
+      else if starts_with path "/api/x/" then begin
+        let q = (try String.sub path 0 (String.index path '?') with Not_found -> path) in
+        let route = String.sub q 6 (String.length q - 6) in   (* "/api/x" を落とす *)
+        let m = let v = str_param path "method" in if v = "" then "say" else v in
+        let a = str_param path "args" in
+        let args = if a = "" then [] else [a] in
+        match Avm.web_call rt route m args with
+        | None ->
+            http_text (Printf.sprintf "no route %s\n公開済み: %s\n" route
+              (String.concat ", " (List.map fst (Avm.web_routes_list ()))))
+        | Some v -> http_text (v ^ "\n")
+      end
+      else if starts_with path "/api/routes" then
+        http_text (String.concat "\n"
+          (List.map (fun (p, a) -> Printf.sprintf "%s -> actor %d" p a) (Avm.web_routes_list ())) ^ "\n")
       else if starts_with path "/api/lines" then http_json (lines_json ())
       else if starts_with path "/api/console" then http_json (console_json (int_param path "since"))
       else if starts_with path "/api/actors" then begin

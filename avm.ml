@@ -102,7 +102,19 @@ let with_lock rt f = Mutex.lock rt.lock; let r = (try f () with e -> Mutex.unloc
 
 let find_actor rt id = with_lock rt (fun () -> Hashtbl.find_opt rt.actors id)
 
+(* ===== web_listen / web_expose =====
+   HTTP のパスをアクタに結びつける。呼び出しの送り主は web_sink という
+   実在しない番号にしておき、そこへ来た reply を横取りして HTTP の応答にする。 *)
+let web_port = ref 0
+let web_routes : (string, int) Hashtbl.t = Hashtbl.create 8
+let web_sink = -2
+let web_reply : int option ref = ref None
+
 let enqueue rt sender recv meth args =
+  if recv = web_sink then begin
+    (* HTTP から呼んだアクタの返信。値を捕まえて待っている側へ渡す *)
+    if meth = "reply" && Array.length args > 0 then web_reply := Some args.(0)
+  end else
   match find_actor rt recv with
   | Some a -> a.enq <- a.enq + 1; mbox_push a.box (sender, meth, args)
   | None -> ()   (* dead/unknown recipient: drop, like the kernel *)
@@ -193,6 +205,10 @@ let rec exec rt actor sender meth args =
             見るのは印字のときだけ。フィールド・引数・送信・演算は整数のまま素通りする。 *)
          | 0x42 -> let v = pop () in io.on_print actor.id (vm_show rt v)
          | 0x43 -> raise Exit
+         (* WEB_LISTEN port / WEB_EXPOSE path, actor *)
+         | 0x50 -> let p = pop () in web_port := p
+         | 0x51 -> let aid = pop () in let path = pop () in
+                   Hashtbl.replace web_routes (vm_show rt path) aid
          | 0x44 -> let fi = u16 code !pc in pc := !pc + 2;
                    let na = u8 code !pc in incr pc;
                    let va = Array.make (max na 0) 0 in
@@ -250,6 +266,7 @@ and reset rt =
     rt.gen <- rt.gen + 1;
     Hashtbl.iter (fun _ a -> a.alive <- false; mbox_push a.box (-1, "__stop", [||])) rt.actors;
     Hashtbl.clear rt.actors;
+    Hashtbl.reset web_routes; web_port := 0; web_reply := None;
     rt.next_id <- 0)
 
 (* Load a .avm module, spawn its first class as a live actor, kick it with
@@ -271,6 +288,30 @@ let loadrun rt (data : bytes) : int =
    an annotated bytecode listing. What is NOT stored — and therefore cannot be
    recovered — is the original .abcl comments and local-variable names; class /
    method / field-count and the complete instruction stream ARE recovered. *)
+(* HTTP から来た文字列を VM の値にする *)
+let vm_intern (s : string) : int =
+  if !vm_heap_n >= vm_heap_max then vm_str_tag lor vm_str_heap lor (vm_heap_max - 1)
+  else begin
+    let i = !vm_heap_n in vm_heap.(i) <- s; incr vm_heap_n;
+    vm_str_tag lor vm_str_heap lor i
+  end
+
+(* 公開したパスへ HTTP から 1 回呼ぶ。返信が来るまで少し待つ。 *)
+let web_call rt (path : string) (meth : string) (args : string list) : string option =
+  match Hashtbl.find_opt web_routes path with
+  | None -> None
+  | Some aid ->
+      web_reply := None;
+      let va = Array.of_list (List.map vm_intern args) in
+      enqueue rt web_sink aid meth va;
+      let rec wait n =
+        match !web_reply with
+        | Some v -> Some (vm_show rt v)
+        | None -> if n <= 0 then Some "" else (Thread.delay 0.005; wait (n - 1))
+      in wait 400   (* 最大 2 秒 *)
+
+let web_routes_list () = Hashtbl.fold (fun k v acc -> (k, v) :: acc) web_routes []
+
 let disassemble (data : bytes) : string =
   let m = read_module data in
   let b = Buffer.create 8192 in
@@ -316,6 +357,7 @@ let disassemble (data : bytes) : string =
             | 0x05 -> "SELF" | 0x06 -> "SENDER" | 0x07 -> "WAIT" | 0x08 -> "DUP"
             | 0x10 -> "ADD" | 0x11 -> "SUB" | 0x12 -> "MUL" | 0x13 -> "DIV" | 0x14 -> "MOD"
             | 0x15 -> "CONCAT"
+            | 0x50 -> "WEBLISTEN" | 0x51 -> "WEBEXPOSE"
             | 0x20 -> "LT" | 0x21 -> "LE" | 0x22 -> "GT" | 0x23 -> "GE" | 0x24 -> "EQ" | 0x25 -> "NE"
             | 0x30 -> Printf.sprintf "JMP     -> %d" (rd16 ())
             | 0x31 -> Printf.sprintf "JZ      -> %d" (rd16 ())
