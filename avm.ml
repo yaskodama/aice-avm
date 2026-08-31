@@ -142,6 +142,9 @@ let vm_show rt v =
     else string_of_int v
   end else string_of_int v
 
+let vm_intern_fwd_ref : (string -> int) ref = ref (fun _ -> 0)
+let vm_intern_fwd s = !vm_intern_fwd_ref s
+
 let vm_concat rt a b =
   let s = vm_show rt a ^ vm_show rt b in
   if !vm_heap_n >= vm_heap_max then vm_str_tag lor vm_str_heap lor (vm_heap_max - 1)
@@ -209,6 +212,11 @@ let rec exec rt actor sender meth args =
          | 0x50 -> let p = pop () in web_port := p
          | 0x51 -> let aid = pop () in let path = pop () in
                    Hashtbl.replace web_routes (vm_show rt path) aid
+         (* AI_CALL: このホスト VM はモデルを持たない。実機（Pi3）はカーネルに
+            焼き込んだ stories260K で推論する。ここでは黙って嘘をつかず、
+            モデルが無いと分かる文字列を返す。 *)
+         | 0x52 -> let p = pop () in
+                   push (vm_concat rt (vm_intern_fwd "(no local model on host) ") p)
          | 0x44 -> let fi = u16 code !pc in pc := !pc + 2;
                    let na = u8 code !pc in incr pc;
                    let va = Array.make (max na 0) 0 in
@@ -310,6 +318,7 @@ let web_call rt (path : string) (meth : string) (args : string list) : string op
         | None -> if n <= 0 then Some "" else (Thread.delay 0.005; wait (n - 1))
       in wait 400   (* 最大 2 秒 *)
 
+let () = vm_intern_fwd_ref := vm_intern
 let web_routes_list () = Hashtbl.fold (fun k v acc -> (k, v) :: acc) web_routes []
 
 let disassemble (data : bytes) : string =

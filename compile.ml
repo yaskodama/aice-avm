@@ -401,6 +401,7 @@ let compile_method ~fields ~params (body : stmt) : string =
              (match args with [] -> () | _ ->
                 u8 0x08; List.iter ce args; u8 0x40; u16 (sid "init"); u8 (List.length args))
          | None -> failwith ("avm: new of unknown class '" ^ cls ^ "'"))
+    | Call ("ai_call", [a]) -> ce a; u8 0x52
     | Call ("print", [a]) -> emit_print a
     | Str s ->
         (* 文字列の値は「0x40000000 | 文字列表の添字」で表す。命令は増やさない。
