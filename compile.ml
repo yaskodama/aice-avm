@@ -349,12 +349,13 @@ let compile_method ~fields ~params (body : stmt) : string =
   let rec ce = function
     | Int n -> u8 0x01; i32 n
     | Var n -> resolve n
+    | Bin ("+", a, c) when has_string (Bin ("+", a, c)) ->
+        (* 実行時の文字列連結。VM の CONCAT(0x15) が文字列ヒープに積む。
+           print の中の連結は emit_print が書式として組み立て時に解決するので
+           ここには来ない（ヒープを使わずに済む）。 *)
+        ce a; ce c; u8 0x15
     | Bin (op, a, c) when has_string (Bin (op, a, c)) ->
-        (* 文字列の連結は print の書式として組み立て時に解決している。
-           実行時に新しい文字列を作る場所が無い（文字列ヒープが無い）ので、
-           print の外での連結は黙って整数加算にせず、ここで落とす。 *)
-        ignore op; ignore a; ignore c;
-        failwith "avm: 文字列の連結は print(...) の中だけ。実行時に文字列を組み立てて渡す/返すには文字列ヒープが要る（この VM には無い）"
+        failwith ("avm: 文字列に " ^ op ^ " は使えない（連結は ++ だけ）")
     | Bin (op, a, c) -> ce a; ce c; u8 (binop_code op)
     | New (cls, args) ->
         (match Hashtbl.find_opt class_index cls with
@@ -418,10 +419,14 @@ let compile_method ~fields ~params (body : stmt) : string =
     | Send (tgt, m, args) ->
         resolve tgt; List.iter ce args; u8 0x40; u16 (sid m); u8 (List.length args)
     | CallS ("reply", args) ->
-        (* この VM に future は無い。reply(v) は「送り主の reply メソッドへ送る」に落とす。
-           AIPL 本来の「呼び出し元へ値を返す」とは意味が異なる。呼ぶ側のクラスに
-           method reply(...) が必要。 *)
-        u8 0x06; List.iter ce args; u8 0x40; u16 (sid "reply"); u8 (List.length args)
+        (* reply(v) は「送り主の reply メソッドへ送る」に落とす（この VM に future は無い）。
+           宛先は sender ではなく、メソッド開始時に控えた __snd を使う。
+           now で継続分割すると後半は別のメッセージの中で走るため、
+           そのとき sender は元の呼び出し元ではなくなっているからである。 *)
+        (match idx_of "__snd" fields with
+         | Some i -> u8 0x02; u8 i
+         | None -> u8 0x06);
+        List.iter ce args; u8 0x40; u16 (sid "reply"); u8 (List.length args)
     | CallS ("print", [a]) -> emit_print a
     | CallS ("wait", [ms]) -> ce ms; u8 0x07
     | CallS ("line", [x1;y1;x2;y2;col]) -> ce x1; ce y1; ce x2; ce y2; ce col; u8 0x45
@@ -517,6 +522,20 @@ let split_at_now ss =
   in go [] ss
 
 let prepare_class (c : cls) : cls =
+  (* 0-) reply を使うクラスは、メソッド開始時に送り主を __snd へ控える。
+     継続分割の後半では sender が変わってしまうので、フィールドに逃がしておく。 *)
+  let rec has_reply = function
+    | CallS ("reply", _) -> true
+    | Block ss -> List.exists has_reply ss
+    | If (_, t, f) -> has_reply t || has_reply f
+    | While (_, b) -> has_reply b
+    | _ -> false in
+  let uses_reply = List.exists (fun m -> has_reply m.body) c.meths in
+  let c = if not uses_reply then c
+          else { c with fields = c.fields @ ["__snd"];
+                 meths = List.map (fun m ->
+                     let ss = match m.body with Block ss -> ss | s -> [s] in
+                     { m with body = Block (Assign ("__snd", Var "sender") :: ss) }) c.meths } in
   (* 0) 式の中の now を一時変数へ持ち上げる *)
   let tctr = ref 0 in
   let c = { c with meths = List.map (fun m ->

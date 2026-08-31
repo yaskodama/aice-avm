@@ -111,12 +111,33 @@ let find_method cls name = List.find_opt (fun mt -> mt.mname = name) cls.methods
 
 (* 文字列の値。0x40000000 のビットが立っていれば文字列表の添字とみなす。
    VM の値は整数のままで、印字のときだけこの判定を通す。 *)
-let vm_str_tag = 0x40000000
+let vm_str_tag  = 0x40000000   (* 文字列の値であることを示す *)
+let vm_str_heap = 0x00800000   (* 立っていれば実行時ヒープ、落ちていればモジュールの文字列表 *)
+let vm_str_mask = 0x007fffff
+
+(* 実行時に作られた文字列の置き場。連結（CONCAT）だけが使う。
+   回収は無い（この VM に GC は無い）ので、上限に達したら印にして止める。 *)
+let vm_heap_max = 256
+let vm_heap : string array = Array.make vm_heap_max ""
+let vm_heap_n = ref 0
+
 let vm_show rt v =
   if v land vm_str_tag <> 0 then begin
-    let i = v land 0xffffff in
-    if i < Array.length rt.m.strings then rt.m.strings.(i) else string_of_int v
+    let i = v land vm_str_mask in
+    if v land vm_str_heap <> 0 then
+      (if i < !vm_heap_n then vm_heap.(i) else "<bad-str>")
+    else if i < Array.length rt.m.strings then rt.m.strings.(i)
+    else string_of_int v
   end else string_of_int v
+
+let vm_concat rt a b =
+  let s = vm_show rt a ^ vm_show rt b in
+  if !vm_heap_n >= vm_heap_max then vm_str_tag lor vm_str_heap lor (vm_heap_max - 1)
+  else begin
+    let i = !vm_heap_n in
+    vm_heap.(i) <- s; incr vm_heap_n;
+    vm_str_tag lor vm_str_heap lor i
+  end
 
 (* Run one method body of `actor` for an incoming (sender, method, args). *)
 let rec exec rt actor sender meth args =
@@ -150,6 +171,8 @@ let rec exec rt actor sender meth args =
          | 0x12 -> let b = pop () in let a = pop () in push (a * b)
          | 0x13 -> let b = pop () in let a = pop () in push (c_div a b)
          | 0x14 -> let b = pop () in let a = pop () in push (c_mod a b)
+         (* CONCAT: 実行時の文字列連結。どちらの側も整数なら数字として並べる *)
+         | 0x15 -> let b = pop () in let a = pop () in push (vm_concat rt a b)
          | 0x20 -> let b = pop () in let a = pop () in push (if a <  b then 1 else 0)
          | 0x21 -> let b = pop () in let a = pop () in push (if a <= b then 1 else 0)
          | 0x22 -> let b = pop () in let a = pop () in push (if a >  b then 1 else 0)
@@ -292,6 +315,7 @@ let disassemble (data : bytes) : string =
             | 0x04 -> Printf.sprintf "LDARG   a%d" (rd8 ())
             | 0x05 -> "SELF" | 0x06 -> "SENDER" | 0x07 -> "WAIT" | 0x08 -> "DUP"
             | 0x10 -> "ADD" | 0x11 -> "SUB" | 0x12 -> "MUL" | 0x13 -> "DIV" | 0x14 -> "MOD"
+            | 0x15 -> "CONCAT"
             | 0x20 -> "LT" | 0x21 -> "LE" | 0x22 -> "GT" | 0x23 -> "GE" | 0x24 -> "EQ" | 0x25 -> "NE"
             | 0x30 -> Printf.sprintf "JMP     -> %d" (rd16 ())
             | 0x31 -> Printf.sprintf "JZ      -> %d" (rd16 ())
