@@ -1,0 +1,26 @@
+// g4: select / case / timeout と、case 本体の reply の帰属
+class Worker {
+  // 外から届く job メッセージを受け取るメソッド
+  method job(k) : string {
+    reply("direct:" ++ k);
+  }
+
+  // select で job を待つ。case 本体の reply は job への返信になるので、
+  // serve 自身は何も reply せず unit のままでよい
+  method serve() : unit {
+    print("waiting");
+    select {
+      case job(k) -> {
+        print("got " ++ k);
+        reply("via select:" ++ k);
+      }
+      timeout 500 -> {
+        print("timed out");
+      }
+    }
+  }
+}
+
+var w = new Worker();
+send w.serve();
+print(now w.job(1));

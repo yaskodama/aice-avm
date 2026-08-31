@@ -21,6 +21,8 @@ type stmt = Assign of string * expr | If of expr * stmt * stmt | While of expr *
           | Block of stmt list | Send of string * string * expr list
           | CallS of string * expr list | Nop
           | LocalDecl of string * expr option   (* メソッド局所 var *)
+          | Select of (string * string list * stmt) list * (expr * stmt) option
+            (* select { case m(ps) -> 本体 ... timeout ms -> 本体 } *)
 type meth = { mn : string; params : string list; body : stmt;
               mlocals : string list }           (* このメソッドが宣言した局所名 *)
 type cls  = { cn : string; fields : string list; meths : meth list;
@@ -32,6 +34,7 @@ type tok = TINT of int | TID of string | TSTR of string
          | EQ2 | NE | LE | GE | LT | GT | ASSIGN
          | PLUS | MINUS | STAR | SLASH | PCT | EOF
          | COLON | BANG | AT   (* 現行 AIPL の注釈用: `: T` / `!{...}` / `@ N` *)
+         | ARROW               (* -> ... select の case の矢印 *)
 
 let lex (s : string) : tok array =
   let n = String.length s in
@@ -78,6 +81,7 @@ let lex (s : string) : tok array =
       let two = if !i + 1 < n then String.sub s !i 2 else "" in
       (match two with
        | "++" -> emit PLUS; i := !i + 2   (* 文字列連結。ここでは + が連結を担う *)
+       | "->" -> emit ARROW; i := !i + 2
        | "==" -> emit EQ2; i := !i + 2
        | "!=" -> emit NE;  i := !i + 2
        | "<=" -> emit LE;  i := !i + 2
@@ -196,6 +200,27 @@ let rec parse_stmt () =
       ignore (advance ());
       while peek () <> SEMI && peek () <> EOF do ignore (advance ()) done;
       (if peek () = SEMI then ignore (advance ())); Nop
+  | TID "select" ->
+      ignore (advance ()); expect LB;
+      let cases = ref [] and tmo = ref None in
+      while peek () <> RB do
+        (match peek () with
+         | TID "case" ->
+             ignore (advance ());
+             let m = id () in expect LP;
+             let ps = if peek () = RP then [] else
+                      (let rec go () = let p = id () in
+                         if peek () = COMMA then (ignore (advance ()); p :: go ()) else [p] in go ()) in
+             expect RP; expect ARROW;
+             cases := (m, ps, parse_stmt ()) :: !cases
+         | TID "timeout" ->
+             ignore (advance ());
+             let ms = parse_add () in expect ARROW;
+             tmo := Some (ms, parse_stmt ())
+         | _ -> failwith "parse: select の中は case か timeout")
+      done;
+      ignore (advance ());
+      Select (List.rev !cases, !tmo)
   | TID "var" ->
       (* メソッド局所 var。隠しフィールドに割り当てるので、この VM の命令だけで足りる。 *)
       ignore (advance ()); let v = id () in
@@ -240,6 +265,9 @@ let parse_params () =
 (* 文の木から、その中で宣言された局所 var の名前を集める *)
 let rec stmt_locals = function
   | LocalDecl (v, _) -> [v]
+  | Select (cs, t) ->
+      List.concat_map (fun (_, _, b) -> stmt_locals b) cs
+      @ (match t with Some (_, b) -> stmt_locals b | None -> [])
   | Block ss -> List.concat_map stmt_locals ss
   | If (_, t, f) -> stmt_locals t @ stmt_locals f
   | While (_, b) -> stmt_locals b
@@ -434,6 +462,7 @@ let compile_method ~fields ~params (body : stmt) : string =
     | CallS ("tri", [x1;y1;x2;y2;x3;y3;col]) ->
         ce x1; ce y1; ce x2; ce y2; ce x3; ce y3; ce col; u8 0x47
     | CallS (f, _) -> failwith ("avm: unsupported call '" ^ f ^ "'")
+    | Select _ -> failwith "avm: select はメソッド直下の文の位置でだけ書ける"
   in
   cs body; u8 0x43;   (* RET *)
   let by = Buffer.to_bytes b in
@@ -469,6 +498,9 @@ let rec ren_s f = function
   | Block ss -> Block (List.map (ren_s f) ss)
   | Send (t, m, args) -> Send (f t, m, List.map (ren_e f) args)
   | CallS (g, args) -> CallS (g, List.map (ren_e f) args)
+  | Select (cs, t) ->
+      Select (List.map (fun (m, ps, b) -> (m, ps, ren_s f b)) cs,
+              Option.map (fun (ms, b) -> (ren_e f ms, ren_s f b)) t)
   | Nop -> Nop
 
 (* 式の中に現れた now を、直前の一時変数へ持ち上げる。
@@ -521,7 +553,67 @@ let split_at_now ss =
     | s :: rest -> go (s :: acc) rest
   in go [] ss
 
+(* ===== select =====
+   select は「今のメソッドを終え、指定のメッセージが来たら続きを走らせる」。
+   継続分割と同じ形に落とせる:
+     ・select のある f は __sel = sid を立てて終わる（timeout があれば __Timer も立てる）
+     ・case job(k) -> 本体   は、メソッド job の先頭に
+         if (__sel == sid) { __sel = 0; 本体; f の残り } else { job の元の本体 }
+       を差し込む
+     ・timeout は __to(sid) 経由で「既定の本体 + f の残り」を走らせる
+   case の仮引数は、受け側メソッドの仮引数に位置で対応づけて名前を書き換える。 *)
+let transform_selects (c : cls) : cls * (int * stmt) list =
+  let sctr = ref 0 in
+  let intercepts : (string, (int * stmt) list) Hashtbl.t = Hashtbl.create 8 in
+  let stouts = ref [] and used = ref false in
+  let split_sel ss =
+    let rec go acc = function
+      | [] -> (List.rev acc, None)
+      | Select (cs, t) :: rest -> (List.rev acc, Some (cs, t, rest))
+      | s :: rest -> go (s :: acc) rest
+    in go [] ss in
+  let meths = List.map (fun m ->
+      let ss = match m.body with Block ss -> ss | s -> [s] in
+      let (pre, k) = split_sel ss in
+      match k with
+      | None -> m
+      | Some (cs, t, rest) ->
+          used := true; incr sctr; let sid = !sctr in
+          List.iter (fun (mn, ps, body) ->
+            (* case の仮引数 -> 受け側メソッドの仮引数へ名前を合わせる *)
+            let target = match List.find_opt (fun x -> x.mn = mn) c.meths with
+              | Some x -> x
+              | None -> failwith ("avm: select の case " ^ mn ^ " に対応するメソッドが無い") in
+            let map = List.mapi (fun i p ->
+                (p, (try List.nth target.params i with _ -> p))) ps in
+            let body = ren_s (fun v -> match List.assoc_opt v map with Some q -> q | None -> v) body in
+            let clause = Block [ Assign ("__sel", Int 0); body; Block rest ] in
+            let cur = try Hashtbl.find intercepts mn with Not_found -> [] in
+            Hashtbl.replace intercepts mn ((sid, clause) :: cur)) cs;
+          let setup = match t with
+            | None -> []
+            | Some (ms, tb) ->
+                stouts := (sid, Block [ Assign ("__sel", Int 0); tb; Block rest ]) :: !stouts;
+                [ LocalDecl (Printf.sprintf "%s#__sel_tmr%d" m.mn sid, Some (New ("__Timer", [])));
+                  Send (Printf.sprintf "%s#__sel_tmr%d" m.mn sid, "fire",
+                        [ ms; Var "self"; Int (10000 + sid) ]) ] in
+          { m with body = Block (pre @ [ Assign ("__sel", Int sid) ] @ setup);
+                   mlocals = m.mlocals @ (match t with
+                     | None -> [] | Some _ -> [ Printf.sprintf "%s#__sel_tmr%d" m.mn sid ]) }) c.meths in
+  if not !used then (c, [])
+  else
+    let meths = List.map (fun m ->
+        match Hashtbl.find_opt intercepts m.mn with
+        | None -> m
+        | Some cls_ ->
+            let orig = m.body in
+            let body = List.fold_left (fun acc (sid, clause) ->
+                If (Bin ("==", Var "__sel", Int sid), clause, acc)) orig cls_ in
+            { m with body }) meths in
+    ({ c with fields = c.fields @ ["__sel"]; meths }, List.rev !stouts)
+
 let prepare_class (c : cls) : cls =
+  let (c, sel_touts) = transform_selects c in
   (* 0-) reply を使うクラスは、メソッド開始時に送り主を __snd へ控える。
      継続分割の後半では sender が変わってしまうので、フィールドに逃がしておく。 *)
   let rec has_reply = function
@@ -529,6 +621,9 @@ let prepare_class (c : cls) : cls =
     | Block ss -> List.exists has_reply ss
     | If (_, t, f) -> has_reply t || has_reply f
     | While (_, b) -> has_reply b
+    | Select (cs, t) ->
+        List.exists (fun (_, _, b) -> has_reply b) cs
+        || (match t with Some (_, b) -> has_reply b | None -> false)
     | _ -> false in
   let uses_reply = List.exists (fun m -> has_reply m.body) c.meths in
   let c = if not uses_reply then c
@@ -603,7 +698,16 @@ let prepare_class (c : cls) : cls =
            else ms @ [ { mn = "__finit"; params = []; mlocals = [];
                          body = Block (List.map (fun (f, e) -> Assign (f, e)) c.finits) } ] in
   let hidden = List.concat_map (fun m -> m.mlocals) ms @ List.rev !extra in
-  if not !uses then { c with fields = c.fields @ hidden; meths = ms }
+  let sel_to_ms =
+    if sel_touts = [] then []
+    else [ { mn = "__to"; params = ["__tk"]; mlocals = [];
+             body = Block (List.map (fun (sid, b) ->
+                 If (Bin ("==", Var "__tk", Int (10000 + sid)),
+                     Block [ If (Bin ("==", Var "__sel", Int sid), b, Nop) ], Nop)) sel_touts) } ] in
+  if not !uses then
+    { c with fields = c.fields @ hidden;
+             meths = (if sel_touts = [] then ms
+                      else List.filter (fun m -> m.mn <> "__to") ms @ sel_to_ms) }
   else begin
     if List.exists (fun m -> m.mn = "reply") c.meths then
       failwith ("avm: クラス " ^ c.cn
@@ -651,6 +755,9 @@ let rec fv_s acc = function
   | Block ss -> List.fold_left fv_s acc ss
   | Send (t, _, args) -> List.fold_left fv_e (t :: acc) args
   | CallS (_, args) -> List.fold_left fv_e acc args
+  | Select (cs, t) ->
+      let acc = List.fold_left (fun a (_, _, b) -> fv_s a b) acc cs in
+      (match t with Some (ms, b) -> fv_s (fv_e acc ms) b | None -> acc)
   | _ -> acc
 
 let distribute_globals (classes : cls list) : cls list =
