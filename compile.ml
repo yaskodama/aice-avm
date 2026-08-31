@@ -15,6 +15,8 @@ type expr = Int of int | Var of string | Str of string
           | Bin of string * expr * expr | New of string * expr list | Call of string * expr list
           | Now of string * string * expr list * (expr * expr) option
             (* now t.m(args) [timeout ms else v] — 継続分割で実現する *)
+          | Future of string * string * expr list          (* future t.m(args) — 送るだけ *)
+          | Await of expr * (expr * expr) option           (* await f [timeout ms else v] *)
 type stmt = Assign of string * expr | If of expr * stmt * stmt | While of expr * stmt
           | Block of stmt list | Send of string * string * expr list
           | CallS of string * expr list | Nop
@@ -123,6 +125,17 @@ and parse_primary () =
         let dflt = parse_add () in
         Now (t, m, a, Some (ms, dflt))
       end else Now (t, m, a, None)
+  | TID "future" ->
+      let t = id () in expect DOT; let m = id () in
+      expect LP; let a = parse_args () in expect RP; Future (t, m, a)
+  | TID "await" ->
+      let h = parse_primary () in
+      if peek () = TID "timeout" then begin
+        ignore (advance ());
+        let ms = parse_add () in
+        (if peek () = TID "else" then ignore (advance ()) else failwith "parse: timeout には else が要る");
+        let d = parse_add () in Await (h, Some (ms, d))
+      end else Await (h, None)
   | TID "self" -> Var "self"
   | TID "sender" -> Var "sender"
   | TID x -> if peek () = LP then (ignore (advance ()); let a = parse_args () in expect RP; Call (x, a)) else Var x
@@ -337,6 +350,8 @@ let compile_method ~fields ~params (body : stmt) : string =
     | Call ("print", [a]) -> emit_print a
     | Str _ -> failwith "avm: bare string only valid in print()"
     | Now _ -> failwith "avm: now はメソッド直下の `var x = now t.m(..);` / `x = now t.m(..);` の位置でだけ書ける"
+    | Future _ -> failwith "avm: future はメソッド直下の `var f = future t.m(..);` の位置でだけ書ける"
+    | Await _  -> failwith "avm: await はメソッド直下の `var x = await f;` の位置でだけ書ける"
     | _ -> failwith "avm: unsupported expression"
   and emit_print a =
     let rec parts = function
@@ -407,6 +422,9 @@ let rec ren_e f = function
   | Call (g, args) -> Call (g, List.map (ren_e f) args)
   | Now (t, m, args, tk) -> Now (f t, m, List.map (ren_e f) args,
                                 Option.map (fun (a,b) -> (ren_e f a, ren_e f b)) tk)
+  | Future (t, m, args) -> Future (f t, m, List.map (ren_e f) args)
+  | Await (h, tk) -> Await (ren_e f h,
+                            Option.map (fun (a,b) -> (ren_e f a, ren_e f b)) tk)
   | e -> e
 
 let rec ren_s f = function
@@ -459,8 +477,13 @@ let hoist_now (ctr : int ref) (ss : stmt list) : stmt list * string list =
 let split_at_now ss =
   let rec go acc = function
     | [] -> (List.rev acc, None)
-    | LocalDecl (x, Some (Now (t, mm, args, tk))) :: rest -> (List.rev acc, Some (x, t, mm, args, tk, rest))
-    | Assign (x, Now (t, mm, args, tk)) :: rest          -> (List.rev acc, Some (x, t, mm, args, tk, rest))
+    | LocalDecl (x, Some (Now (t, mm, args, tk))) :: rest ->
+        (List.rev acc, Some (x, Some (t, mm, args), tk, rest))
+    | Assign (x, Now (t, mm, args, tk)) :: rest ->
+        (List.rev acc, Some (x, Some (t, mm, args), tk, rest))
+    (* await は「送らずに切るだけ」の分割点。送信は future の地点で済んでいる *)
+    | LocalDecl (x, Some (Await (_, tk))) :: rest -> (List.rev acc, Some (x, None, tk, rest))
+    | Assign (x, Await (_, tk)) :: rest           -> (List.rev acc, Some (x, None, tk, rest))
     | s :: rest -> go (s :: acc) rest
   in go [] ss
 
@@ -471,6 +494,23 @@ let prepare_class (c : cls) : cls =
       let ss = match m.body with Block ss -> ss | s -> [s] in
       let (ss, tmps) = hoist_now tctr ss in
       { m with body = Block ss; mlocals = m.mlocals @ tmps }) c.meths } in
+  (* 0.5) future は「送るだけ」に書き換える。切るのは await の地点。
+     返信に相関 ID が無いので、未処理の future は同時に 1 つまで。 *)
+  let rewrite_futures ss =
+    let outstanding = ref 0 in
+    List.concat_map (fun s ->
+      match s with
+      | LocalDecl (_, Some (Future (t, mm, args))) | Assign (_, Future (t, mm, args)) ->
+          incr outstanding;
+          if !outstanding > 1 then
+            failwith "avm: 未処理の future は同時に 1 つまで（この VM の返信に相関 ID が無く区別できない）";
+          [ Assign ("__k", Int 0); Send (t, mm, args) ]
+      | LocalDecl (_, Some (Await _)) | Assign (_, Await _) -> decr outstanding; [ s ]
+      | s -> [ s ]) ss
+  in
+  let c = { c with meths = List.map (fun m ->
+      let ss = match m.body with Block ss -> ss | s -> [s] in
+      { m with body = Block (rewrite_futures ss) }) c.meths } in
   let ms = List.map (fun m ->
       let f v = if List.mem v m.mlocals then m.mn ^ "#" ^ v else v in
       { m with body = ren_s f m.body;
@@ -486,7 +526,7 @@ let prepare_class (c : cls) : cls =
     let (pre, k) = split_at_now ss in
     match k with
     | None -> Block pre
-    | Some (x, t, mm, args, tk, rest) ->
+    | Some (x, sendopt, tk, rest) ->
         uses := true; incr kctr; let kid = !kctr in
         let cont = chop owner rest in
         entries := (kid, x, cont) :: !entries;
@@ -500,7 +540,11 @@ let prepare_class (c : cls) : cls =
               [ LocalDecl (tv, Some (New ("__Timer", [])));
                 Send (tv, "fire", [ ms; Var "self"; Int kid ]) ]
         in
-        Block (pre @ [ Assign ("__k", Int kid) ] @ setup @ [ Send (t, mm, args) ])
+        (* now は送ってから切る。await は future の地点で送信済みなので切るだけ。 *)
+        let tail = match sendopt with
+          | Some (t, mm, args) -> [ Send (t, mm, args) ]
+          | None -> [] in
+        Block (pre @ [ Assign ("__k", Int kid) ] @ setup @ tail)
   in
   let ms = List.map (fun m ->
       let ss = match m.body with Block ss -> ss | s -> [s] in

@@ -1,0 +1,22 @@
+class Slow {
+  var n = 0;
+  method work(k: int) : int !{mut} { wait(200); n = k * 2; reply(n); }
+  method fast(k: int) : int !{mut} { n = k * 3; reply(n); }
+}
+class Drv {
+  var s = 0;
+  var side = 0;
+  method go() : unit !{mut} {
+    s = new Slow();
+    var f = future s.fast(5);   // 送るだけ。ここでは待たない
+    side = side + 100;          // future と await の間の処理
+    print("between = " ++ side);
+    var c = await f;            // ここで切れる
+    print("await = " ++ c);
+    var g = future s.work(7);
+    var d = await g timeout 30 else 777;   // 200ms かかるので期限切れ
+    print("await(timeout) = " ++ d);
+  }
+}
+var d = new Drv();
+send d.go();
