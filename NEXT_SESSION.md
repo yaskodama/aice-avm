@@ -3,7 +3,7 @@
 ## ★2026-08-30〜31 — AVM の処理系を現行 AIPL へ追従させた（main に push 済み）
 
 **目的**: Xinu Pi3/Pi5 の実機で「最新の AIPL」を動かすこと。
-**結果**: **正典ガイド 10 本が 0/10 → 8/10**。焼き直しは **2 回だけ**で済んだ。
+**結果**: **正典ガイド 10 本が 0/10 → 9/10**（実機で確定）。焼き直しは **3 回**。
 
 ### 物差し
 
@@ -27,6 +27,7 @@ g1  hello, AIPL / tick 1 / tick 2
 g2  twice = 43 / awaited = 20 / v=7
 g3  ok, left=7 / sold out
 g4  waiting / got 1 / via select:1
+g5  /api/routes -> /echo -> a2 ; /api/x/echo?method=say&args=hi -> echo: hi
 g7  fast = 42 / slow(timed out) = 0 / await = 42
 g8  literal true ok / literal false ok / b = 1 / not-eq: 1
 g9  got actor / after send / pong
@@ -57,6 +58,7 @@ g10 fork = 1 / latch = 2
 |---|---|---|
 | 文字列を値に | `0x40000000 | 文字列表の添字`。**印字のときだけタグを見る** | `8a20d5b9…` |
 | 実行時の文字列連結 | 文字列ヒープ + `CONCAT`(0x15)。ヒープはビット23で区別 | `90bd55eb…` |
+| **`web_listen`/`web_expose`** | 命令 0x50/0x51 + 経路表。呼び出しの送り主を `web_sink(-2)` にして、そこ宛ての `reply` を横取りし HTTP 応答にする。webactor に `/api/x/<パス>` と `/api/routes` | `558bc437…` |
 
 **成立の鍵**: 局所変数を先に隠しフィールドにしたこと。アクタの状態なので、
 メソッドを継続分割しても値が残る。`now`/`future`/`await`/`select` は全部これに乗っている。
@@ -73,12 +75,11 @@ g10 fork = 1 / latch = 2
 - **黙って落とさない。** 未対応は必ずコンパイルエラーにする（`now` の位置、`future` の同時 2 個、
   文字列への `-`、`case` に対応するメソッドが無い、など）。
 
-### 残り 2 本 — 言語の追従ではなく実行環境の拡張
+### 残り 1 本
 
 | 本 | 要るもの | 見立て |
 |---|---|---|
-| g5 `web_listen` / `web_expose` | HTTP のルートをアクタへ結線する。ホスト側は server.ml に振り分けを足す。**Pi3 は webactor.c に VM への振り分けを作る＝3 回目の焼き** | やれば届く。中規模 |
-| g6 `ai_call` | AI 呼び出しの結線。**Pi3 に AI は無い**（Pi5 には小さなモデルがある） | **Pi3 では原理的に不可能** |
+| g6 `ai_call` | AI 呼び出しの結線。**Pi3 に AI は無い**（Pi5 には小さなモデルがある） | **Pi3 では原理的に不可能。ここが打ち止め** |
 
 ### 制限（黙らずにエラーにしてある）
 
