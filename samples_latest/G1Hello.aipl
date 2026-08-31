@@ -1,0 +1,17 @@
+// g1: クラス・フィールド・init・メソッド・send・文字列連結
+class Greeter {
+  var count = 0;              // フィールド。int で初期化
+
+  method init(name) {         // new のときに自動で呼ばれる
+    print("hello, " ++ name); // ++ は文字列連結（両辺を文字列化する）
+  }
+
+  method tick() : unit {      // 戻り値注釈。reply しないので unit
+    count = count + 1;        // + は数値専用
+    print("tick " ++ count);
+  }
+}
+
+var g = new Greeter("AIPL");
+send g.tick();                // 非同期。返信を待たない
+send g.tick();

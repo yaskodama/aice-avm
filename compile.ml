@@ -348,7 +348,11 @@ let compile_method ~fields ~params (body : stmt) : string =
                 u8 0x08; List.iter ce args; u8 0x40; u16 (sid "init"); u8 (List.length args))
          | None -> failwith ("avm: new of unknown class '" ^ cls ^ "'"))
     | Call ("print", [a]) -> emit_print a
-    | Str _ -> failwith "avm: bare string only valid in print()"
+    | Str s ->
+        (* 文字列の値は「0x40000000 | 文字列表の添字」で表す。命令は増やさない。
+           VM 側は印字のときだけこのタグを見る（avm.ml の vm_show）。
+           注意: タグ付き値に算術を掛けても検査されない（この処理系に型は無い）。 *)
+        u8 0x01; i32 (0x40000000 lor (sid s))
     | Now _ -> failwith "avm: now はメソッド直下の `var x = now t.m(..);` / `x = now t.m(..);` の位置でだけ書ける"
     | Future _ -> failwith "avm: future はメソッド直下の `var f = future t.m(..);` の位置でだけ書ける"
     | Await _  -> failwith "avm: await はメソッド直下の `var x = await f;` の位置でだけ書ける"

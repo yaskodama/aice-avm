@@ -109,6 +109,15 @@ let enqueue rt sender recv meth args =
 
 let find_method cls name = List.find_opt (fun mt -> mt.mname = name) cls.methods
 
+(* 文字列の値。0x40000000 のビットが立っていれば文字列表の添字とみなす。
+   VM の値は整数のままで、印字のときだけこの判定を通す。 *)
+let vm_str_tag = 0x40000000
+let vm_show rt v =
+  if v land vm_str_tag <> 0 then begin
+    let i = v land 0xffffff in
+    if i < Array.length rt.m.strings then rt.m.strings.(i) else string_of_int v
+  end else string_of_int v
+
 (* Run one method body of `actor` for an incoming (sender, method, args). *)
 let rec exec rt actor sender meth args =
   if actor.cidx < 0 || actor.cidx >= Array.length rt.m.classes then () else
@@ -157,7 +166,9 @@ let rec exec rt actor sender meth args =
                    let mname = if mn < Array.length rt.m.strings then rt.m.strings.(mn) else "" in
                    enqueue rt actor.id recv mname va
          | 0x41 -> let ci = u16 code !pc in pc := !pc + 2; push (spawn rt ci)
-         | 0x42 -> let v = pop () in io.on_print actor.id (string_of_int v)
+         (* 文字列の値は「0x40000000 | 文字列表の添字」というタグ付き整数で流れてくる。
+            見るのは印字のときだけ。フィールド・引数・送信・演算は整数のまま素通りする。 *)
+         | 0x42 -> let v = pop () in io.on_print actor.id (vm_show rt v)
          | 0x43 -> raise Exit
          | 0x44 -> let fi = u16 code !pc in pc := !pc + 2;
                    let na = u8 code !pc in incr pc;
@@ -169,7 +180,7 @@ let rec exec rt actor sender meth args =
                    let flen = String.length f in
                    while !i < flen do
                      if !i + 1 < flen && f.[!i] = '%' && f.[!i+1] = 'd' then begin
-                       (if !ai < na then Buffer.add_string buf (string_of_int va.(!ai)); incr ai);
+                       (if !ai < na then Buffer.add_string buf (vm_show rt va.(!ai)); incr ai);
                        i := !i + 2
                      end else (Buffer.add_char buf f.[!i]; incr i)
                    done;
