@@ -13,13 +13,15 @@
 (* ===== AST ===== *)
 type expr = Int of int | Var of string | Str of string
           | Bin of string * expr * expr | New of string * expr list | Call of string * expr list
+          | Now of string * string * expr list   (* now t.m(args) — 継続分割で実現する *)
 type stmt = Assign of string * expr | If of expr * stmt * stmt | While of expr * stmt
           | Block of stmt list | Send of string * string * expr list
           | CallS of string * expr list | Nop
           | LocalDecl of string * expr option   (* メソッド局所 var *)
 type meth = { mn : string; params : string list; body : stmt;
               mlocals : string list }           (* このメソッドが宣言した局所名 *)
-type cls  = { cn : string; fields : string list; meths : meth list }
+type cls  = { cn : string; fields : string list; meths : meth list;
+              finits : (string * expr) list }   (* var f = e; の初期値 *)
 
 (* ===== Lexer ===== *)
 type tok = TINT of int | TID of string | TSTR of string
@@ -110,6 +112,9 @@ and parse_primary () =
   | TINT n -> Int n
   | TSTR s -> Str s
   | TID "new" -> let c = id () in expect LP; let a = parse_args () in expect RP; New (c, a)
+  | TID "now" ->
+      let t = id () in expect DOT; let m = id () in
+      expect LP; let a = parse_args () in expect RP; Now (t, m, a)
   | TID "self" -> Var "self"
   | TID "sender" -> Var "sender"
   | TID x -> if peek () = LP then (ignore (advance ()); let a = parse_args () in expect RP; Call (x, a)) else Var x
@@ -221,12 +226,18 @@ let rec stmt_locals = function
 
 let parse_class () =
   expect (TID "class"); let name = id () in expect LB;
-  let fields = ref [] and meths = ref [] in
+  let fields = ref [] and meths = ref [] and finits = ref [] in
   while peek () <> RB do
     match peek () with
     | TID "var" ->
         ignore (advance ()); let f = id () in
-        (if peek () = ASSIGN then (ignore (advance ()); ignore (parse_expr ())));
+        skip_type_ann_stmt ();
+        (if peek () = ASSIGN then begin
+           ignore (advance ());
+           let e = parse_expr () in
+           (* 以前はここで ignore していた＝「var n = 100;」が黙って 0 になっていた *)
+           finits := (f, e) :: !finits
+         end);
         expect SEMI; fields := f :: !fields
     | TID "method" ->
         ignore (advance ()); let mn = id () in expect LP;
@@ -241,13 +252,8 @@ let parse_class () =
     | _ -> failwith "parse: expected var/method in class body"
   done;
   ignore (advance ());
-  let ms = List.rev !meths in
-  (* 局所変数は "メソッド名#局所名" という隠しフィールドに割り当てる。
-     '#' は識別子に現れないので、ユーザのフィールドと衝突しない。
-     メソッド本体は最後まで一気に走る（send は非同期で途中で止まらない）ので、
-     アクタごとに 1 枠で足りる。 *)
-  let hidden = List.concat_map (fun m -> List.map (fun v -> m.mn ^ "#" ^ v) m.mlocals) ms in
-  { cn = name; fields = List.rev !fields @ hidden; meths = ms }
+  { cn = name; fields = List.rev !fields; meths = List.rev !meths;
+    finits = List.rev !finits }
 
 let parse_program src =
   toks := lex src; pos := 0;
@@ -265,10 +271,8 @@ let parse_program src =
          tick を送る」約束なので、__Top を先頭に置けばそのまま起点になる。
          トップレベルの var は tick のメソッド局所 var として扱う。 *)
       let body = Block ts in
-      let ml = stmt_locals body in
-      let hidden = List.map (fun v -> "tick#" ^ v) ml in
-      { cn = "__Top"; fields = hidden;
-        meths = [ { mn = "tick"; params = []; body; mlocals = ml } ] } :: classes
+      { cn = "__Top"; fields = []; finits = [];
+        meths = [ { mn = "tick"; params = []; body; mlocals = stmt_locals body } ] } :: classes
 
 (* ===== Codegen (mirrors avm_gen.ml) ===== *)
 let binop_code = function
@@ -283,12 +287,11 @@ let sid s = match Hashtbl.find_opt strs s with
   | None -> let i = !str_n in Hashtbl.replace strs s i; str_rev := s :: !str_rev; incr str_n; i
 
 let class_index : (string, int) Hashtbl.t = Hashtbl.create 8
+let class_has_finit : (string, unit) Hashtbl.t = Hashtbl.create 8
 let idx_of name lst =
   let rec go i = function [] -> None | x :: _ when x = name -> Some i | _ :: t -> go (i+1) t in go 0 lst
 
-let compile_method ~fields ~params ~locals ~mname (body : stmt) : string =
-  let hid v = mname ^ "#" ^ v in
-  let is_local v = List.mem v locals in
+let compile_method ~fields ~params (body : stmt) : string =
   let b = Buffer.create 64 in
   let lbl = ref 0 in
   let new_label () = incr lbl; !lbl in
@@ -305,9 +308,7 @@ let compile_method ~fields ~params ~locals ~mname (body : stmt) : string =
     else match idx_of n params with
       | Some i -> u8 0x04; u8 i
       | None ->
-        (* 局所変数はフィールドより先に見る（同名なら局所が勝つ） *)
-        let key = if is_local n then hid n else n in
-        (match idx_of key fields with
+        (match idx_of n fields with
          | Some i -> u8 0x02; u8 i
          | None -> failwith ("avm: unknown variable '" ^ n ^ "'")) in
   let rec has_string = function Str _ -> true | Bin (_, a, c) -> has_string a || has_string c | _ -> false in
@@ -318,11 +319,16 @@ let compile_method ~fields ~params ~locals ~mname (body : stmt) : string =
     | New (cls, args) ->
         (match Hashtbl.find_opt class_index cls with
          | Some ci -> u8 0x41; u16 ci;
+             (* 初期値がある場合は先に __finit を送る。メールボックスは FIFO なので
+                呼び出し側が続けて送るメッセージより必ず先に走る。 *)
+             (if Hashtbl.mem class_has_finit cls then
+                (u8 0x08; u8 0x40; u16 (sid "__finit"); u8 0));
              (match args with [] -> () | _ ->
                 u8 0x08; List.iter ce args; u8 0x40; u16 (sid "init"); u8 (List.length args))
          | None -> failwith ("avm: new of unknown class '" ^ cls ^ "'"))
     | Call ("print", [a]) -> emit_print a
     | Str _ -> failwith "avm: bare string only valid in print()"
+    | Now _ -> failwith "avm: now はメソッド直下の `var x = now t.m(..);` / `x = now t.m(..);` の位置でだけ書ける"
     | _ -> failwith "avm: unsupported expression"
   and emit_print a =
     let rec parts = function
@@ -344,12 +350,12 @@ let compile_method ~fields ~params ~locals ~mname (body : stmt) : string =
     | Nop -> ()
     | Assign (n, e) ->
         ce e;
-        let key = if is_local n then hid n else n in
-        (match idx_of key fields with Some i -> u8 0x03; u8 i
+        (match idx_of n fields with Some i -> u8 0x03; u8 i
          | None -> failwith ("avm: assignment to non-field '" ^ n ^ "'"))
     | LocalDecl (v, init) ->
+        (* この時点で v は既に隠しフィールド名に書き換わっている *)
         (match init with Some e -> ce e | None -> u8 0x01; i32 0);
-        (match idx_of (hid v) fields with Some i -> u8 0x03; u8 i
+        (match idx_of v fields with Some i -> u8 0x03; u8 i
          | None -> failwith ("avm: local slot missing for '" ^ v ^ "'"))
     | If (c, t, f) ->
         ce c; let l_else = new_label () and l_end = new_label () in
@@ -380,14 +386,85 @@ let compile_method ~fields ~params ~locals ~mname (body : stmt) : string =
     Bytes.set by (p+1) (Char.chr ((off asr 8) land 0xff))) !fixups;
   Bytes.to_string by
 
+(* ===== 局所名の確定と、now の継続分割 =====
+   1) メソッド局所 var を "メソッド名#局所名" の隠しフィールド名へ書き換える。
+   2) `var x = now t.m(a);` を「送って終わり」と「返信で続きを走らせる」に切る。
+      局所はフィールドなので、分割をまたいでも値が残る（ここが効いている）。
+      切った後半は合成した reply(__v) の中で `__k` を見て選ばれる。
+      この VM に future は無いので、これが now を実現する唯一の道。 *)
+let rec ren_e f = function
+  | Var v -> Var (f v)
+  | Bin (o, a, b) -> Bin (o, ren_e f a, ren_e f b)
+  | New (c, args) -> New (c, List.map (ren_e f) args)
+  | Call (g, args) -> Call (g, List.map (ren_e f) args)
+  | Now (t, m, args) -> Now (f t, m, List.map (ren_e f) args)
+  | e -> e
+
+let rec ren_s f = function
+  | Assign (n, e) -> Assign (f n, ren_e f e)
+  | LocalDecl (v, e) -> LocalDecl (f v, Option.map (ren_e f) e)
+  | If (c, t, el) -> If (ren_e f c, ren_s f t, ren_s f el)
+  | While (c, b) -> While (ren_e f c, ren_s f b)
+  | Block ss -> Block (List.map (ren_s f) ss)
+  | Send (t, m, args) -> Send (f t, m, List.map (ren_e f) args)
+  | CallS (g, args) -> CallS (g, List.map (ren_e f) args)
+  | Nop -> Nop
+
+let split_at_now ss =
+  let rec go acc = function
+    | [] -> (List.rev acc, None)
+    | LocalDecl (x, Some (Now (t, mm, args))) :: rest -> (List.rev acc, Some (x, t, mm, args, rest))
+    | Assign (x, Now (t, mm, args)) :: rest        -> (List.rev acc, Some (x, t, mm, args, rest))
+    | s :: rest -> go (s :: acc) rest
+  in go [] ss
+
+let prepare_class (c : cls) : cls =
+  let ms = List.map (fun m ->
+      let f v = if List.mem v m.mlocals then m.mn ^ "#" ^ v else v in
+      { m with body = ren_s f m.body;
+               mlocals = List.map (fun v -> m.mn ^ "#" ^ v) m.mlocals }) c.meths in
+  let kctr = ref 0 and entries = ref [] and uses = ref false in
+  let rec chop ss =
+    let (pre, k) = split_at_now ss in
+    match k with
+    | None -> Block pre
+    | Some (x, t, mm, args, rest) ->
+        uses := true; incr kctr; let kid = !kctr in
+        let cont = chop rest in
+        entries := (kid, x, cont) :: !entries;
+        Block (pre @ [ Assign ("__k", Int kid); Send (t, mm, args) ])
+  in
+  let ms = List.map (fun m ->
+      let ss = match m.body with Block ss -> ss | s -> [s] in
+      { m with body = chop ss }) ms in
+  (* フィールド初期値は合成メソッド __finit にまとめ、生成直後に送る（後述の New 参照）。
+     この VM には生成フックが無いので、これが初期値を効かせる唯一の道。 *)
+  let ms = if c.finits = [] then ms
+           else ms @ [ { mn = "__finit"; params = []; mlocals = [];
+                         body = Block (List.map (fun (f, e) -> Assign (f, e)) c.finits) } ] in
+  let hidden = List.concat_map (fun m -> m.mlocals) ms in
+  if not !uses then { c with fields = c.fields @ hidden; meths = ms }
+  else begin
+    if List.exists (fun m -> m.mn = "reply") c.meths then
+      failwith ("avm: クラス " ^ c.cn
+                ^ " は now を使っているので reply を自分で定義できない（継続の受け口に使うため）");
+    let disp = Block (List.map (fun (kid, x, b) ->
+        If (Bin ("==", Var "__k", Int kid), Block [ Assign (x, Var "__v"); b ], Nop))
+        (List.rev !entries)) in
+    { c with fields = c.fields @ hidden @ ["__k"];
+             meths = ms @ [ { mn = "reply"; params = ["__v"]; body = disp; mlocals = [] } ] }
+  end
+
 let gen_program (classes : cls list) : bytes =
   Hashtbl.reset strs; str_rev := []; str_n := 0; Hashtbl.reset class_index;
+  Hashtbl.reset class_has_finit;
+  List.iter (fun c -> if c.finits <> [] then Hashtbl.replace class_has_finit c.cn ()) classes;
+  let classes = List.map prepare_class classes in
   List.iteri (fun i c -> Hashtbl.replace class_index c.cn i) classes;
   let compiled = List.map (fun c ->
     let ms = List.map (fun m ->
       (sid m.mn, List.length m.params,
-       compile_method ~fields:c.fields ~params:m.params
-                      ~locals:m.mlocals ~mname:m.mn m.body)) c.meths in
+       compile_method ~fields:c.fields ~params:m.params m.body)) c.meths in
     (sid c.cn, List.length c.fields, ms)) classes in
   let out = Buffer.create 256 in
   let u8 x = Buffer.add_char out (Char.chr (x land 0xff)) in

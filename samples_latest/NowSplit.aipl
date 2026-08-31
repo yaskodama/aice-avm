@@ -1,0 +1,14 @@
+class S {
+  var n = 100;
+  method take(k: int) : int !{mut} { n = n - k; reply(n); }
+}
+class F {
+  var s = 0;
+  method go() : unit !{mut} {
+    s = new S();
+    var left = now s.take(40);
+    print("left = " ++ left);
+  }
+}
+var f = new F();
+send f.go();
