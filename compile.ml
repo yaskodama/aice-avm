@@ -720,10 +720,18 @@ let prepare_class (c : cls) : cls =
     if List.exists (fun m -> m.mn = "reply") c.meths then
       failwith ("avm: クラス " ^ c.cn
                 ^ " は now を使っているので reply を自分で定義できない（継続の受け口に使うため）");
-    let disp = Block (List.map (fun (kid, x, b) ->
-        If (Bin ("==", Var "__k", Int kid),
-            Block [ Assign ("__k", Int 0); Assign (x, Var "__v"); b ], Nop))
-        (List.rev !entries)) in
+    (* 期限切れで見捨てた呼び出しの返信は、あとから必ず届く。この VM の返信には
+       相関 ID が無いので、そのままだと「次の継続」がそれを自分宛だと思って
+       起きてしまう（g7 の await が、期限切れにした work の 42 を受け取っていた）。
+       見捨てた本数を __pend に数え、その本数だけ返信を捨てる。
+       ★ 限界: 相手が複数アクタに分かれていると到着順が入れ替わりうる。
+          単一の呼び先（FIFO）なら見捨てた分が必ず先に来るので正しい。 *)
+    let disp = If (Bin (">", Var "__pend", Int 0),
+        Assign ("__pend", Bin ("-", Var "__pend", Int 1)),
+        Block (List.map (fun (kid, x, b) ->
+            If (Bin ("==", Var "__k", Int kid),
+                Block [ Assign ("__k", Int 0); Assign (x, Var "__v"); b ], Nop))
+            (List.rev !entries))) in
     let ms = ms @ [ { mn = "reply"; params = ["__v"]; body = disp; mlocals = [] } ] in
     let ms =
       if !touts = [] then ms
@@ -731,11 +739,13 @@ let prepare_class (c : cls) : cls =
         let td = Block (List.map (fun (kid, x, dflt, b) ->
             If (Bin ("==", Var "__tk", Int kid),
                 Block [ If (Bin ("==", Var "__k", Int kid),
-                            Block [ Assign ("__k", Int 0); Assign (x, dflt); b ], Nop) ], Nop))
+                            Block [ Assign ("__k", Int 0);
+                                    Assign ("__pend", Bin ("+", Var "__pend", Int 1));
+                                    Assign (x, dflt); b ], Nop) ], Nop))
             (List.rev !touts)) in
         ms @ [ { mn = "__to"; params = ["__tk"]; body = td; mlocals = [] } ]
     in
-    { c with fields = c.fields @ hidden @ ["__k"]; meths = ms }
+    { c with fields = c.fields @ hidden @ ["__k"; "__pend"]; meths = ms }
   end
 
 (* ===== 大域変数（トップレベルの var）を、参照するクラスへ配る =====
