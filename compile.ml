@@ -58,8 +58,10 @@ let lex (s : string) : tok array =
       let w = String.sub s !i (!j - !i) in
       (* 現行 AIPL の真偽値リテラル。AVM は真偽値を整数で持つ *)
       (match w with
-       | "true"  -> emit (TINT 1)
-       | "false" -> emit (TINT 0)
+       (* 真偽値はタグ付きで積む（0x20000000 | 0/1）。印字で true/false に戻す。
+          VM 側は vm_show と JZ の両方でこのタグを見る（avm.ml / abcl_program.c）。 *)
+       | "true"  -> emit (TINT 0x20000001)
+       | "false" -> emit (TINT 0x20000000)
        | _       -> emit (TID w));
       i := !j
     end
@@ -348,6 +350,7 @@ let sid s = match Hashtbl.find_opt strs s with
 
 let class_index : (string, int) Hashtbl.t = Hashtbl.create 8
 let class_has_finit : (string, unit) Hashtbl.t = Hashtbl.create 8
+let class_has_init  : (string, unit) Hashtbl.t = Hashtbl.create 8
 (* クラス名 -> そのクラスが要る大域変数の名前。new の直後に __setg で配る *)
 let class_globals : (string, string list) Hashtbl.t = Hashtbl.create 8
 let idx_of name lst =
@@ -398,8 +401,14 @@ let compile_method ~fields ~params (body : stmt) : string =
               | Some gs ->
                   u8 0x08; List.iter (fun g -> ce (Var g)) gs;
                   u8 0x40; u16 (sid "__setg"); u8 (List.length gs));
-             (match args with [] -> () | _ ->
-                u8 0x08; List.iter ce args; u8 0x40; u16 (sid "init"); u8 (List.length args))
+             (* init は new のときに必ず呼ばれる（正典）。以前は引数があるときだけ
+                送っていたので、`new C()` で `method init()` が黙って走らなかった。
+                Pi 3 の VM は spawn のたびに init を自動で投げていて、その分だけ
+                辻褄が合っていたが、引数つきのときは二重に走っていた
+                （g1 が `hello, 0` を余分に出していたのがこれ）。
+                自動投入は VM 側で止め、ここから必ず一度だけ送る。 *)
+             (if Hashtbl.mem class_has_init cls then
+                (u8 0x08; List.iter ce args; u8 0x40; u16 (sid "init"); u8 (List.length args)))
          | None -> failwith ("avm: new of unknown class '" ^ cls ^ "'"))
     | Call ("ai_call", [a]) -> ce a; u8 0x52
     | Call ("print", [a]) -> emit_print a
@@ -804,9 +813,11 @@ let distribute_globals (classes : cls list) : cls list =
 
 let gen_program (classes : cls list) : bytes =
   Hashtbl.reset strs; str_rev := []; str_n := 0; Hashtbl.reset class_index;
-  Hashtbl.reset class_has_finit; Hashtbl.reset class_globals;
+  Hashtbl.reset class_has_finit; Hashtbl.reset class_has_init; Hashtbl.reset class_globals;
   let classes = distribute_globals classes in
   List.iter (fun c -> if c.finits <> [] then Hashtbl.replace class_has_finit c.cn ()) classes;
+  List.iter (fun c -> if List.exists (fun m -> m.mn = "init") c.meths then
+                        Hashtbl.replace class_has_init c.cn ()) classes;
   let classes = List.map prepare_class classes in
   (* timeout を使ったクラスがあれば、待ち役の __Timer を足す。
      wait は自分のアクタだけを止めるので、別アクタにやらせれば

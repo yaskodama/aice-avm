@@ -127,6 +127,16 @@ let vm_str_tag  = 0x40000000   (* 文字列の値であることを示す *)
 let vm_str_heap = 0x00800000   (* 立っていれば実行時ヒープ、落ちていればモジュールの文字列表 *)
 let vm_str_mask = 0x007fffff
 
+(* 真偽値。0x20000000 のビットが立っていれば真偽値で、値は最下位ビット。
+   文字列と同じ「印字のときだけタグを見る」やり方だが、真偽値は
+   [1m条件判定でもタグを見なければならない[0m ―― false = 0x20000000 は 0 ではないので、
+   素の JZ では偽と判定されない。vm_falsy を通すこと。
+   Pi 3 の VM（apps/abcl_program.c）と同じ約束。 *)
+let vm_bool_tag = 0x20000000
+let vm_bool b   = vm_bool_tag lor (if b then 1 else 0)
+let vm_is_bool v = v land vm_bool_tag <> 0 && v land vm_str_tag = 0
+let vm_falsy v  = if vm_is_bool v then v land 1 = 0 else v = 0
+
 (* 実行時に作られた文字列の置き場。連結（CONCAT）だけが使う。
    回収は無い（この VM に GC は無い）ので、上限に達したら印にして止める。 *)
 let vm_heap_max = 256
@@ -134,7 +144,8 @@ let vm_heap : string array = Array.make vm_heap_max ""
 let vm_heap_n = ref 0
 
 let vm_show rt v =
-  if v land vm_str_tag <> 0 then begin
+  if vm_is_bool v then (if v land 1 = 1 then "true" else "false")
+  else if v land vm_str_tag <> 0 then begin
     let i = v land vm_str_mask in
     if v land vm_str_heap <> 0 then
       (if i < !vm_heap_n then vm_heap.(i) else "<bad-str>")
@@ -188,14 +199,14 @@ let rec exec rt actor sender meth args =
          | 0x14 -> let b = pop () in let a = pop () in push (c_mod a b)
          (* CONCAT: 実行時の文字列連結。どちらの側も整数なら数字として並べる *)
          | 0x15 -> let b = pop () in let a = pop () in push (vm_concat rt a b)
-         | 0x20 -> let b = pop () in let a = pop () in push (if a <  b then 1 else 0)
-         | 0x21 -> let b = pop () in let a = pop () in push (if a <= b then 1 else 0)
-         | 0x22 -> let b = pop () in let a = pop () in push (if a >  b then 1 else 0)
-         | 0x23 -> let b = pop () in let a = pop () in push (if a >= b then 1 else 0)
-         | 0x24 -> let b = pop () in let a = pop () in push (if a =  b then 1 else 0)
-         | 0x25 -> let b = pop () in let a = pop () in push (if a <> b then 1 else 0)
+         | 0x20 -> let b = pop () in let a = pop () in push (vm_bool (a <  b))
+         | 0x21 -> let b = pop () in let a = pop () in push (vm_bool (a <= b))
+         | 0x22 -> let b = pop () in let a = pop () in push (vm_bool (a >  b))
+         | 0x23 -> let b = pop () in let a = pop () in push (vm_bool (a >= b))
+         | 0x24 -> let b = pop () in let a = pop () in push (vm_bool (a =  b))
+         | 0x25 -> let b = pop () in let a = pop () in push (vm_bool (a <> b))
          | 0x30 -> pc := u16 code !pc
-         | 0x31 -> let t = u16 code !pc in pc := !pc + 2; if pop () = 0 then pc := t
+         | 0x31 -> let t = u16 code !pc in pc := !pc + 2; if vm_falsy (pop ()) then pc := t
          | 0x40 -> let mn = u16 code !pc in pc := !pc + 2;
                    let na = u8 code !pc in incr pc;
                    let va = Array.make (max na 0) 0 in
