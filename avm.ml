@@ -137,12 +137,34 @@ let vm_bool b   = vm_bool_tag lor (if b then 1 else 0)
 (* acquire/release が握っている資源名。実行時の対の確認に使う。 *)
 let res_held : (string, bool) Hashtbl.t = Hashtbl.create 8
 
-let vm_err_tag  = 0x10000000   (* result<tau> の失敗。compile.ml の vm_err と同じ *)
+let vm_err_tag  = 0x10000000
+(* --- 実機 Pi 3 と同じタグ体系。非負のとき上位 3 ビットが種類を表す。
+       000 整数 / 001 err / 010 真偽値 / 011 浮動小数 / 100 文字列 / 101 配列 *)
+let vm_tag_mask = 0x70000000
+let vm_flt_tag  = 0x30000000
+let vm_lst_tag  = 0x50000000
+let vm_payload  = 0x0FFFFFFF
+
+let vm_fheap : float array = Array.make 128 0.0
+let vm_fheap_n = ref 0
+let vm_mkflt (d : float) =
+  let i = if !vm_fheap_n >= 128 then 127 else (let i = !vm_fheap_n in incr vm_fheap_n; i) in
+  vm_fheap.(i) <- d; vm_flt_tag lor i
+let vm_is_flt v = v >= 0 && (v land vm_tag_mask) = vm_flt_tag
+let vm_fltval v = if vm_is_flt v then vm_fheap.(v land vm_payload) else float_of_int v
+
+let vm_lheap : int array array = Array.make 64 [||]
+let vm_lheap_n = ref 0
+let vm_mklst (a : int array) =
+  let i = if !vm_lheap_n >= 64 then 63 else (let i = !vm_lheap_n in incr vm_lheap_n; i) in
+  vm_lheap.(i) <- a; vm_lst_tag lor i
+let vm_is_lst v = v >= 0 && (v land vm_tag_mask) = vm_lst_tag
+let vm_lst v = if vm_is_lst v then vm_lheap.(v land vm_payload) else [||]   (* result<tau> の失敗。compile.ml の vm_err と同じ *)
 (* タグ判定はどれも「非負であること」を先に確かめる。負の整数は上位ビットが
    すべて立っているので、この番人が無いと -1 が文字列だと誤認される。 *)
-let vm_is_bool v = v >= 0 && v land vm_bool_tag <> 0 && v land vm_str_tag = 0
-let vm_is_err  v = v >= 0 && v land vm_err_tag <> 0 && v land (vm_str_tag lor vm_bool_tag) = 0
-let vm_is_str  v = v >= 0 && v land vm_str_tag <> 0
+let vm_is_bool v = v >= 0 && (v land 0x70000000) = vm_bool_tag
+let vm_is_err  v = v >= 0 && (v land 0x70000000) = vm_err_tag
+let vm_is_str  v = v >= 0 && (v land 0x70000000) = vm_str_tag
 let vm_falsy v  = if vm_is_bool v then v land 1 = 0 else v = 0
 
 (* 実行時に作られた文字列の置き場。連結（CONCAT）だけが使う。
@@ -154,9 +176,12 @@ let vm_heap_n = ref 0
 let vm_remote_value_fwd : (string -> int) ref = ref (fun _ -> 0)
 let vm_remote_value _rt t = !vm_remote_value_fwd t
 
-let vm_show rt v =
+let rec vm_show rt v =
   if vm_is_bool v then (if v land 1 = 1 then "true" else "false")
   else if vm_is_err v then "err"
+  else if vm_is_flt v then Printf.sprintf "%.6f" (vm_fltval v)
+  else if vm_is_lst v then
+    "[" ^ String.concat ", " (Array.to_list (Array.map (fun x -> vm_show rt x) (vm_lst v))) ^ "]"
   else if vm_is_str v then begin
     let i = v land vm_str_mask in
     if v land vm_str_heap <> 0 then
@@ -262,19 +287,69 @@ let rec exec rt actor sender meth args =
          | 0x06 -> push sender
          | 0x07 -> let ms = pop () in if ms > 0 then Thread.delay (float_of_int ms /. 1000.)
          | 0x08 -> let v = if !sp > 0 then stk.(!sp - 1) else 0 in push v
-         | 0x10 -> let b = pop () in let a = pop () in push (a + b)
-         | 0x11 -> let b = pop () in let a = pop () in push (a - b)
-         | 0x12 -> let b = pop () in let a = pop () in push (a * b)
-         | 0x13 -> let b = pop () in let a = pop () in push (c_div a b)
+         (* どちらかが浮動小数なら実数で計算する（実機 Pi 3 と同じ約束） *)
+         | 0x10 -> let b = pop () in let a = pop () in
+             push (if vm_is_flt a || vm_is_flt b then vm_mkflt (vm_fltval a +. vm_fltval b) else a + b)
+         | 0x11 -> let b = pop () in let a = pop () in
+             push (if vm_is_flt a || vm_is_flt b then vm_mkflt (vm_fltval a -. vm_fltval b) else a - b)
+         | 0x12 -> let b = pop () in let a = pop () in
+             push (if vm_is_flt a || vm_is_flt b then vm_mkflt (vm_fltval a *. vm_fltval b) else a * b)
+         | 0x13 -> let b = pop () in let a = pop () in
+             push (if vm_is_flt a || vm_is_flt b then
+                     (let d = vm_fltval b in vm_mkflt (if d = 0.0 then 0.0 else vm_fltval a /. d))
+                   else c_div a b)
          | 0x14 -> let b = pop () in let a = pop () in push (c_mod a b)
          (* CONCAT: 実行時の文字列連結。どちらの側も整数なら数字として並べる *)
          | 0x15 -> let b = pop () in let a = pop () in push (vm_concat rt a b)
-         | 0x20 -> let b = pop () in let a = pop () in push (vm_bool (a <  b))
-         | 0x21 -> let b = pop () in let a = pop () in push (vm_bool (a <= b))
-         | 0x22 -> let b = pop () in let a = pop () in push (vm_bool (a >  b))
-         | 0x23 -> let b = pop () in let a = pop () in push (vm_bool (a >= b))
-         | 0x24 -> let b = pop () in let a = pop () in push (vm_bool (a =  b))
-         | 0x25 -> let b = pop () in let a = pop () in push (vm_bool (a <> b))
+         | 0x20 -> let b = pop () in let a = pop () in
+             push (vm_bool (if vm_is_flt a || vm_is_flt b then vm_fltval a <  vm_fltval b else a <  b))
+         | 0x21 -> let b = pop () in let a = pop () in
+             push (vm_bool (if vm_is_flt a || vm_is_flt b then vm_fltval a <= vm_fltval b else a <= b))
+         | 0x22 -> let b = pop () in let a = pop () in
+             push (vm_bool (if vm_is_flt a || vm_is_flt b then vm_fltval a >  vm_fltval b else a >  b))
+         | 0x23 -> let b = pop () in let a = pop () in
+             push (vm_bool (if vm_is_flt a || vm_is_flt b then vm_fltval a >= vm_fltval b else a >= b))
+         | 0x24 -> let b = pop () in let a = pop () in
+             push (vm_bool (if vm_is_flt a || vm_is_flt b then vm_fltval a =  vm_fltval b else a =  b))
+         | 0x25 -> let b = pop () in let a = pop () in
+             push (vm_bool (if vm_is_flt a || vm_is_flt b then vm_fltval a <> vm_fltval b else a <> b))
+         (* 浮動小数リテラル: 次の 8 バイトが IEEE754 のビット列（下位から） *)
+         | 0x5E ->
+             let bits = ref 0L in
+             for k = 0 to 7 do
+               bits := Int64.logor !bits (Int64.shift_left (Int64.of_int (Char.code (Bytes.get code (!pc + k)))) (8 * k))
+             done;
+             pc := !pc + 8;
+             push (vm_mkflt (Int64.float_of_bits !bits))
+         (* 配列（正典 array_*）。実機 Pi 3 と同じ命令番号 *)
+         | 0x57 -> push (vm_mklst [||])
+         | 0x58 -> let e = pop () in let a = pop () in
+             push (vm_mklst (Array.append (vm_lst a) [| e |]))
+         | 0x59 -> let i = pop () in let a = pop () in
+             let arr = vm_lst a in
+             let i = if vm_is_flt i then int_of_float (vm_fltval i) else i in
+             push (if i >= 0 && i < Array.length arr then arr.(i) else 0)
+         | 0x5A -> let e = pop () in let i = pop () in let a = pop () in
+             let arr = Array.copy (vm_lst a) in
+             let i = if vm_is_flt i then int_of_float (vm_fltval i) else i in
+             if i >= 0 && i < Array.length arr then arr.(i) <- e;
+             push (vm_mklst arr)
+         | 0x5B -> let a = pop () in push (Array.length (vm_lst a))
+         | 0x5C -> let n = pop () in
+             let n = if vm_is_flt n then int_of_float (vm_fltval n) else n in
+             push (vm_mklst (Array.make (max n 0) 0))
+         (* 数学組込み。番号は compile.ml / abcl_program.c と揃える *)
+         | 0x5D ->
+             let k = Char.code (Bytes.get code !pc) in incr pc;
+             let x = vm_fltval (pop ()) in
+             let r = (match k with
+               | 0 -> sqrt x | 1 -> exp x | 2 -> log x | 3 -> log10 x
+               | 4 -> sin x  | 5 -> cos x | 6 -> tan x | 7 -> asin x
+               | 8 -> acos x | 9 -> atan x
+               | 10 -> floor x | 11 -> ceil x
+               | 12 -> Float.round x | 13 -> abs_float x | 14 -> -. x
+               | _ -> 0.0) in
+             push (vm_mkflt r)
          | 0x30 -> pc := u16 code !pc
          | 0x31 -> let t = u16 code !pc in pc := !pc + 2; if vm_falsy (pop ()) then pc := t
          | 0x40 -> let mn = u16 code !pc in pc := !pc + 2;

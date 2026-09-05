@@ -16,7 +16,7 @@
    文字列 0x40000000・真偽値 0x20000000 と重ならないビットを使う。 *)
 let vm_err = 0x10000000
 
-type expr = Int of int | Var of string | Str of string
+type expr = Int of int | Flt of float | Var of string | Str of string
           | Bin of string * expr * expr | New of string * expr list | Call of string * expr list
           | Now of string * string * expr list * (expr * expr) option
             (* now t.m(args) [timeout ms else v] — 継続分割で実現する *)
@@ -39,7 +39,7 @@ type cls  = { cn : string; fields : string list; meths : meth list;
               finits : (string * expr) list }   (* var f = e; の初期値 *)
 
 (* ===== Lexer ===== *)
-type tok = TINT of int | TID of string | TSTR of string
+type tok = TINT of int | TFLT of float | TID of string | TSTR of string
          | LB | RB | LP | RP | SEMI | COMMA | DOT
          | EQ2 | NE | LE | GE | LT | GT | ASSIGN
          | PLUS | MINUS | STAR | SLASH | PCT | EOF
@@ -61,7 +61,16 @@ let lex (s : string) : tok array =
       (while !i < n && s.[!i] <> '\n' do incr i done)
     else if is_dig c then begin
       let j = ref !i in while !j < n && is_dig s.[!j] do incr j done;
-      emit (TINT (int_of_string (String.sub s !i (!j - !i)))); i := !j
+      (* 小数点が続けば浮動小数。`10.` のように末尾が点だけの形も正典にある。 *)
+      if !j < n && s.[!j] = '.' then begin
+        let k = ref (!j + 1) in
+        while !k < n && is_dig s.[!k] do incr k done;
+        let txt = String.sub s !i (!k - !i) in
+        let txt = if txt.[String.length txt - 1] = '.' then txt ^ "0" else txt in
+        emit (TFLT (float_of_string txt)); i := !k
+      end else begin
+        emit (TINT (int_of_string (String.sub s !i (!j - !i)))); i := !j
+      end
     end
     else if is_id0 c then begin
       let j = ref !i in while !j < n && is_idc s.[!j] do incr j done;
@@ -139,6 +148,7 @@ let rec parse_args () =
 and parse_primary () =
   match advance () with
   | TINT n -> Int n
+  | TFLT f -> Flt f
   | TSTR s -> Str s
   | TID "new" -> let c = id () in expect LP; let a = parse_args () in expect RP; New (c, a)
   (* parse_primary は advance () で分岐するので、ここでの peek () は
@@ -483,6 +493,30 @@ let compile_method ~fields ~params (body : stmt) : string =
         (match dl with Some (ms, _) -> ce ms | None -> ce (Int 2000));
         (match dl with Some (_, d) -> ce d | None -> ce (Int vm_err));
         u8 0x56
+    (* 浮動小数リテラル。32 ビットの値には収まらないので、命令に 8 バイト
+       付けて VM の表に置かせる（VM 側で添字を積む）。 *)
+    | Flt f ->
+        u8 0x5E;
+        let bits = Int64.bits_of_float f in
+        for k = 0 to 7 do
+          u8 (Int64.to_int (Int64.logand (Int64.shift_right_logical bits (8 * k)) 0xFFL))
+        done
+    (* 配列（正典 array_*）。命令番号は abcl_program.c と揃えること。 *)
+    | Call ("array_empty", []) -> u8 0x57
+    | Call ("array_push", [a; e]) -> ce a; ce e; u8 0x58
+    | Call ("array_get", [a; i]) -> ce a; ce i; u8 0x59
+    | Call ("array_set", [a; i; e]) -> ce a; ce i; ce e; u8 0x5A
+    | Call ("array_len", [a]) -> ce a; u8 0x5B
+    | Call ("array_zeros", [nn]) -> ce nn; u8 0x5C
+    (* 数学組込み。番号は abcl_program.c の switch と揃えること。 *)
+    | Call (("sqrt"|"exp"|"log"|"log10"|"sin"|"cos"|"tan"|"asin"|"acos"
+            |"atan"|"floor"|"ceil"|"round"|"abs"|"neg") as fn, [a]) ->
+        let k = match fn with
+          | "sqrt" -> 0 | "exp" -> 1 | "log" -> 2 | "log10" -> 3
+          | "sin" -> 4 | "cos" -> 5 | "tan" -> 6 | "asin" -> 7
+          | "acos" -> 8 | "atan" -> 9 | "floor" -> 10 | "ceil" -> 11
+          | "round" -> 12 | "abs" -> 13 | _ -> 14 in
+        ce a; u8 0x5D; u8 k
     | Call ("is_ok", [r]) -> ce (Bin ("!=", r, Int vm_err))
     | Call ("value", [r; d]) ->
         (* r が一度しか評価されないよう、判定と取り出しで同じ式を二度書かない。
@@ -758,7 +792,7 @@ let prepare_class (c : cls) : cls =
     | RNow (_, _, _, es, d) ->
         List.exists e_replyto es
         || (match d with Some (a, b) -> e_replyto a || e_replyto b | None -> false)
-    | Int _ | Var _ | Str _ -> false in
+    | Int _ | Flt _ | Var _ | Str _ -> false in
   let rec has_reply = function
     | CallS ("reply", _) | CallS ("answer", _) -> true
     | Assign (_, e) | LocalDecl (_, Some e) -> e_replyto e
