@@ -566,6 +566,15 @@ let compile_method ~fields ~params (body : stmt) : string =
         ce p; ce (Var name); u8 0x51
     | CallS ("web_expose", _) ->
         failwith "avm: web_expose(\"/path\", \"アクタ変数名\") の形で書く"
+    (* spawn("クラス名", "名前") — 名前を付けてアクタを作る。
+       この VM には「名前つきアクタ表」が別にあるわけではなく、公開表
+       （web_expose のもの）がそれである。作った番号をその名前で載せれば、
+       remote("host","名前") からも /api/x/名前 からも届く ―― 同じ表を
+       二つの入口が使うので、名前の意味が一つに保たれる。 *)
+    | CallS ("spawn", [Str cls; Str nm]) ->
+        ce (Str ("/" ^ nm)); ce (New (cls, [])); u8 0x51
+    | CallS ("spawn", _) ->
+        failwith "avm: spawn(\"クラス名\", \"名前\") の形で書く（どちらも文字列リテラル）"
     | CallS ("tri", [x1;y1;x2;y2;x3;y3;col]) ->
         ce x1; ce y1; ce x2; ce y2; ce x3; ce y3; ce col; u8 0x47
     (* send remote(h,n).m(args) — 押す順は VM の 0x55 と揃える *)
