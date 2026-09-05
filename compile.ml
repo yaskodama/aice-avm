@@ -22,9 +22,14 @@ type expr = Int of int | Var of string | Str of string
             (* now t.m(args) [timeout ms else v] — 継続分割で実現する *)
           | Future of string * string * expr list          (* future t.m(args) — 送るだけ *)
           | Await of expr * (expr * expr) option           (* await f [timeout ms else v] *)
+          | RNow of expr * expr * string * expr list * (expr * expr) option
+            (* now remote(host, name).m(args) [timeout ms else v]
+               継続分割は要らない。運びかたの側（UDP）が同期に見せるからである。 *)
 type stmt = Assign of string * expr | If of expr * stmt * stmt | While of expr * stmt
           | Block of stmt list | Send of string * string * expr list
           | CallS of string * expr list | Nop
+          | RSend of expr * expr * string * expr list
+            (* send remote(host, name).m(args) — 返事を待たない *)
           | LocalDecl of string * expr option   (* メソッド局所 var *)
           | Select of (string * string list * stmt) list * (expr * stmt) option
             (* select { case m(ps) -> 本体 ... timeout ms -> 本体 } *)
@@ -115,6 +120,16 @@ let peek () = !toks.(!pos)
 let advance () = let t = !toks.(!pos) in incr pos; t
 let expect t = if peek () = t then ignore (advance ()) else failwith "parse: unexpected token"
 let id () = match advance () with TID s -> s | _ -> failwith "parse: expected identifier"
+let peek2 () = if !pos + 1 < Array.length !toks then !toks.(!pos + 1) else EOF
+let str_lit () = match advance () with
+  | TSTR s -> s | _ -> failwith "parse: expected a string literal"
+
+(* remote("host:port", "actorName") — 送信先の位置でだけ現れる *)
+let parse_remote () =
+  expect (TID "remote"); expect LP;
+  let h = str_lit () in expect COMMA;
+  let n = str_lit () in expect RP;
+  (Str h, Str n)
 
 let rec parse_args () =
   if peek () = RP then []
@@ -126,6 +141,20 @@ and parse_primary () =
   | TINT n -> Int n
   | TSTR s -> Str s
   | TID "new" -> let c = id () in expect LP; let a = parse_args () in expect RP; New (c, a)
+  (* parse_primary は advance () で分岐するので、ここでの peek () は
+     `now` の次の語である。send の側（parse_stmt）は peek () で分岐するため
+     peek2 () を見る ―― 同じ判定に見えて根拠が違う。 *)
+  | TID "now" when (match peek () with TID "remote" -> true | _ -> false) ->
+      let (h, nm) = parse_remote () in
+      expect DOT; let m = id () in
+      expect LP; let a = parse_args () in expect RP;
+      if peek () = TID "timeout" then begin
+        ignore (advance ());
+        let ms = parse_add () in
+        let dflt = if peek () = TID "else" then (ignore (advance ()); Some (parse_add ()))
+                   else None in
+        RNow (h, nm, m, a, Some (ms, (match dflt with Some d -> d | None -> Int vm_err)))
+      end else RNow (h, nm, m, a, None)
   | TID "now" ->
       let t = id () in expect DOT; let m = id () in
       expect LP; let a = parse_args () in expect RP;
@@ -206,6 +235,13 @@ let rec parse_stmt () =
         else parse_expr () in
       (if peek () = TID "do" then ignore (advance ()));
       While (c, parse_stmt ())
+  | TID "send" when (match peek2 () with TID "remote" -> true | _ -> false) ->
+      (* send remote("host:port","name").m(args) *)
+      ignore (advance ());
+      let (h, nm) = parse_remote () in
+      expect DOT; let m = id () in
+      expect LP; let a = parse_args () in expect RP; expect SEMI;
+      RSend (h, nm, m, a)
   | TID "send" ->
       (* `send!` は「検査を緩めた送信」。この VM は静的検査をしないので、
          配送の意味は `send` と同じ。'!' を読み飛ばす。 *)
@@ -436,6 +472,17 @@ let compile_method ~fields ~params (body : stmt) : string =
          | None -> failwith ("avm: new of unknown class '" ^ cls ^ "'"))
     (* result<tau> の観測子。専用命令は要らない: 失敗は予約値 vm_err なので
        比較と選択だけで書ける。VM を変えずに済むのでカーネルの焼き直しも不要。 *)
+    (* now remote(h,n).m(args) [timeout ms [else v]] — 0x56。
+       継続分割は要らない（運びかたの側が同期に見せる）。
+       既定値も命令に渡す。else を書かなければ err を渡すので、そのまま
+       result<tau> になる ―― 期限切れの扱いが一箇所に閉じる。 *)
+    | RNow (h, n, m, a, dl) ->
+        if List.length a > 1 then failwith "avm: remote は引数 1 個まで";
+        ce h; ce n; ce (Str m);
+        (match a with [x] -> ce x | [] -> ce (Int 0) | _ -> ());
+        (match dl with Some (ms, _) -> ce ms | None -> ce (Int 2000));
+        (match dl with Some (_, d) -> ce d | None -> ce (Int vm_err));
+        u8 0x56
     | Call ("is_ok", [r]) -> ce (Bin ("!=", r, Int vm_err))
     | Call ("value", [r; d]) ->
         (* r が一度しか評価されないよう、判定と取り出しで同じ式を二度書かない。
@@ -521,6 +568,12 @@ let compile_method ~fields ~params (body : stmt) : string =
         failwith "avm: web_expose(\"/path\", \"アクタ変数名\") の形で書く"
     | CallS ("tri", [x1;y1;x2;y2;x3;y3;col]) ->
         ce x1; ce y1; ce x2; ce y2; ce x3; ce y3; ce col; u8 0x47
+    (* send remote(h,n).m(args) — 押す順は VM の 0x55 と揃える *)
+    | RSend (h, n, m, a) ->
+        if List.length a > 1 then failwith "avm: remote は引数 1 個まで";
+        ce h; ce n; ce (Str m);
+        (match a with [x] -> ce x | [] -> ce (Int 0) | _ -> ());
+        u8 0x55
     | CallS (f, _) -> failwith ("avm: unsupported call '" ^ f ^ "'")
     | Select _ -> failwith "avm: select はメソッド直下の文の位置でだけ書ける"
   in
@@ -548,6 +601,9 @@ let rec ren_e f = function
   | Future (t, m, args) -> Future (f t, m, List.map (ren_e f) args)
   | Await (h, tk) -> Await (ren_e f h,
                             Option.map (fun (a,b) -> (ren_e f a, ren_e f b)) tk)
+  | RNow (h, n, m, args, tk) ->
+      RNow (h, n, m, List.map (ren_e f) args,
+            Option.map (fun (a,b) -> (ren_e f a, ren_e f b)) tk)
   | e -> e
 
 let rec ren_s f = function
@@ -557,6 +613,8 @@ let rec ren_s f = function
   | While (c, b) -> While (ren_e f c, ren_s f b)
   | Block ss -> Block (List.map (ren_s f) ss)
   | Send (t, m, args) -> Send (f t, m, List.map (ren_e f) args)
+  (* remote は宛先が文字列なので、名前の付け替えは引数だけに効く *)
+  | RSend (h, n, m, args) -> RSend (h, n, m, List.map (ren_e f) args)
   | CallS (g, args) -> CallS (g, List.map (ren_e f) args)
   | Select (cs, t) ->
       Select (List.map (fun (m, ps, b) -> (m, ps, ren_s f b)) cs,
@@ -687,6 +745,9 @@ let prepare_class (c : cls) : cls =
     | Future (_, _, es) -> List.exists e_replyto es
     | Await (h, d) ->
         e_replyto h
+        || (match d with Some (a, b) -> e_replyto a || e_replyto b | None -> false)
+    | RNow (_, _, _, es, d) ->
+        List.exists e_replyto es
         || (match d with Some (a, b) -> e_replyto a || e_replyto b | None -> false)
     | Int _ | Var _ | Str _ -> false in
   let rec has_reply = function

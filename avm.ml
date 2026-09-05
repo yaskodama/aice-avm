@@ -151,6 +151,9 @@ let vm_heap_max = 256
 let vm_heap : string array = Array.make vm_heap_max ""
 let vm_heap_n = ref 0
 
+let vm_remote_value_fwd : (string -> int) ref = ref (fun _ -> 0)
+let vm_remote_value _rt t = !vm_remote_value_fwd t
+
 let vm_show rt v =
   if vm_is_bool v then (if v land 1 = 1 then "true" else "false")
   else if vm_is_err v then "err"
@@ -161,6 +164,52 @@ let vm_show rt v =
     else if i < Array.length rt.m.strings then rt.m.strings.(i)
     else string_of_int v
   end else string_of_int v
+
+(* ===== remote("host:port","actor") — 実機 3 台と同じ UDP/9010 の電文 =====
+   要求  Q <reqid> <actor> <method> <arg...>\n
+   応答  R <reqid> <値>\n
+   ここは送り側だけ。受け側（この Mac を相手役にする）は server.ml の口に載せる。 *)
+let remote_next_id = ref 1
+
+let remote_xfer host actor meth arg timeout_ms : string option =
+  let (h, port) =
+    match String.index_opt host ':' with
+    | Some i -> (String.sub host 0 i,
+                 int_of_string (String.sub host (i+1) (String.length host - i - 1)))
+    | None -> (host, 9010) in
+  let sock = Unix.socket Unix.PF_INET Unix.SOCK_DGRAM 0 in
+  let fin () = (try Unix.close sock with _ -> ()) in
+  (try
+    let addr = Unix.ADDR_INET (Unix.inet_addr_of_string h, port) in
+    let id = !remote_next_id in
+    incr remote_next_id;
+    let q = Printf.sprintf "Q %d %s %s %s\n" id actor meth arg in
+    ignore (Unix.sendto sock (Bytes.of_string q) 0 (String.length q) [] addr);
+    if timeout_ms <= 0 then (fin (); None)
+    else begin
+      let buf = Bytes.create 1024 in
+      let deadline = Unix.gettimeofday () +. float_of_int timeout_ms /. 1000.0 in
+      let rec loop () =
+        let left = deadline -. Unix.gettimeofday () in
+        if left <= 0.0 then None
+        else match Unix.select [sock] [] [] left with
+          | ([], _, _) -> None
+          | _ ->
+            let (n, _) = Unix.recvfrom sock buf 0 (Bytes.length buf) [] in
+            let line = String.trim (Bytes.sub_string buf 0 n) in
+            (* "R <id> <値>" の id が合うものだけ拾う *)
+            if String.length line > 2 && line.[0] = 'R' && line.[1] = ' ' then begin
+              let rest = String.sub line 2 (String.length line - 2) in
+              match String.index_opt rest ' ' with
+              | Some k ->
+                  let gid = try int_of_string (String.sub rest 0 k) with _ -> -1 in
+                  if gid = id then Some (String.sub rest (k+1) (String.length rest - k - 1))
+                  else loop ()
+              | None -> loop ()
+            end else loop () in
+      let r = loop () in fin (); r
+    end
+  with _ -> fin (); None)
 
 let vm_intern_fwd_ref : (string -> int) ref = ref (fun _ -> 0)
 let vm_intern_fwd s = !vm_intern_fwd_ref s
@@ -232,6 +281,30 @@ let rec exec rt actor sender meth args =
             対の追跡は正典の型検査器の仕事なので、ここは実行時の錠だけ持つ。
             ホスト VM はアクタを OCaml のスレッドで回すので、名前ごとの
             Mutex を張る。取れなければ取れるまで待つ。 *)
+         (* REMOTE_SEND / REMOTE_CALL — 実機 3 台と同じ電文（UDP/9010、ASCII 一行）。
+            ホスト VM も同じ言葉を話せば、板を 1 台ずつ焼きながら Mac を
+            相手役にして確かめられる。 *)
+         | 0x55 ->
+             let arg = vm_show rt (pop ()) in
+             let meth = vm_show rt (pop ()) in
+             let actor = vm_show rt (pop ()) in
+             let host = vm_show rt (pop ()) in
+             (try ignore (remote_xfer host actor meth arg 0) with _ -> ())
+         | 0x56 ->
+             let dflt = pop () in
+             let ms = pop () in
+             let arg = vm_show rt (pop ()) in
+             let meth = vm_show rt (pop ()) in
+             let actor = vm_show rt (pop ()) in
+             let host = vm_show rt (pop ()) in
+             (* 相手が "err" を返した場合も失敗として扱う（宛先が無い・
+                メソッドが無い）。期限切れと同じ扱いにしないと、else が
+                効かないところが一箇所だけ残ってしまう。 *)
+             (match (try remote_xfer host actor meth arg ms with _ -> None) with
+              | Some t ->
+                  let v = vm_remote_value rt t in
+                  push (if v = vm_err_tag then dflt else v)
+              | None -> push dflt)
          | 0x53 -> let n = vm_show rt (pop ()) in Hashtbl.replace res_held n true
          | 0x54 -> let n = vm_show rt (pop ()) in Hashtbl.remove res_held n
          (* WEB_LISTEN port / WEB_EXPOSE path, actor *)
@@ -330,6 +403,17 @@ let vm_intern (s : string) : int =
     vm_str_tag lor vm_str_heap lor i
   end
 
+(* 相手が描いた文字列を値に読み直す。型は運んでいない ―― 正典の型検査器が
+   両側の型を合わせている前提で成り立つ約束である（実機 3 台と同じ規則）。 *)
+let () = vm_remote_value_fwd := (fun t ->
+  if t = "" then vm_intern ""
+  else if t = "true"  then vm_bool true
+  else if t = "false" then vm_bool false
+  else if t = "err"   then vm_err_tag
+  else match int_of_string_opt t with
+    | Some n -> n
+    | None -> vm_intern t)
+
 (* 公開したパスへ HTTP から 1 回呼ぶ。返信が来るまで少し待つ。 *)
 let web_call rt (path : string) (meth : string) (args : string list) : string option =
   match Hashtbl.find_opt web_routes path with
@@ -343,6 +427,30 @@ let web_call rt (path : string) (meth : string) (args : string list) : string op
         | Some v -> Some (vm_show rt v)
         | None -> if n <= 0 then Some "" else (Thread.delay 0.005; wait (n - 1))
       in wait 400   (* 最大 2 秒 *)
+
+(* remote(...) の受け口から呼ぶ版。web_call との違いは引数の扱いだけで、
+   数字だけの文字列は整数値として渡す（正典の `now remote(...).step(3)` は
+   整数を取る。文字列のまま渡すと相手側の x * 2 が意味をなさない）。
+   実機 3 台の vm_remote_call / cc_remote_dispatch と同じ規則である。 *)
+let remote_dispatch rt (path : string) (meth : string) (args : string list)
+    : string option =
+  match Hashtbl.find_opt web_routes path with
+  | None -> None
+  | Some aid ->
+      web_reply := None;
+      let to_val a =
+        match int_of_string_opt a with
+        | Some n -> n
+        | None -> if a = "true" then vm_bool true
+                  else if a = "false" then vm_bool false
+                  else vm_intern a in
+      let va = Array.of_list (List.map to_val args) in
+      enqueue rt web_sink aid meth va;
+      let rec wait n =
+        match !web_reply with
+        | Some v -> Some (vm_show rt v)
+        | None -> if n <= 0 then Some "" else (Thread.delay 0.005; wait (n - 1))
+      in wait 400
 
 let () = vm_intern_fwd_ref := vm_intern
 let web_routes_list () = Hashtbl.fold (fun k v acc -> (k, v) :: acc) web_routes []

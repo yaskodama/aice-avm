@@ -963,6 +963,45 @@ let make_listen port =
     Unix.listen s 16;
     (s, Printf.sprintf "0.0.0.0:%d (IPv4)" port)
 
+(* AIPL の remote("host:port","actor") の受け口。実機 3 台と同じ電文を話すので、
+   この Mac をそのまま相手役にできる（板を 1 台ずつ焼きながら確かめられる）。 *)
+let remote_listener rt =
+  let sock = Unix.socket Unix.PF_INET Unix.SOCK_DGRAM 0 in
+  (try Unix.setsockopt sock Unix.SO_REUSEADDR true with _ -> ());
+  (try
+    Unix.bind sock (Unix.ADDR_INET (Unix.inet_addr_any, 9010));
+    Printf.printf "[aice-avm] AIPL remote listening on UDP 9010\n%!"
+  with e ->
+    Printf.printf "[aice-avm] AIPL remote: UDP 9010 を開けません (%s)\n%!"
+      (Printexc.to_string e); raise e);
+  let buf = Bytes.create 2048 in
+  while true do
+    try
+      let (n, from) = Unix.recvfrom sock buf 0 (Bytes.length buf) [] in
+      let line = String.trim (Bytes.sub_string buf 0 n) in
+      if String.length line > 2 && line.[0] = 'Q' && line.[1] = ' ' then begin
+        (* Q <reqid> <actor> <method> <arg...> — arg は行末まで *)
+        let rest = String.sub line 2 (String.length line - 2) in
+        let parts = String.split_on_char ' ' rest in
+        match parts with
+        | id :: actor :: meth :: argl ->
+            let arg = String.concat " " argl in
+            (* 公開名は "/echo" で登録されている。両方の書き方を受ける。 *)
+            let v =
+              match Avm.remote_dispatch rt actor meth (if arg = "" then [] else [arg]) with
+              | Some r -> r
+              | None ->
+                (match Avm.remote_dispatch rt ("/" ^ actor) meth
+                         (if arg = "" then [] else [arg]) with
+                 | Some r -> r
+                 | None -> "err") in
+            let r = Printf.sprintf "R %s %s\n" id v in
+            ignore (Unix.sendto sock (Bytes.of_string r) 0 (String.length r) [] from)
+        | _ -> ()
+      end
+    with _ -> ()
+  done
+
 let () =
   Array.iteri (fun i a ->
     if i > 0 then
@@ -979,6 +1018,7 @@ let () =
   Printf.printf "[aice-avm] send actors with:  send <thishost>:%d samples/Rotate4Lines.abcl\n%!" !the_port;
   (* Open the Xinu desktop UI in the browser right away (respects --no-open). *)
   open_browser ();
+  ignore (Thread.create (fun () -> try remote_listener rt with _ -> ()) ());
   while true do
     let (fd, _) = Unix.accept s in
     (* don't leak this client fd into a child spawned by /api/restart *)
