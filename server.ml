@@ -974,6 +974,10 @@ let remote_listener rt =
   with e ->
     Printf.printf "[aice-avm] AIPL remote: UDP 9010 を開けません (%s)\n%!"
       (Printexc.to_string e); raise e);
+  (* 応答の控え（at-most-once）。実機は要求を再送するので、素朴に作ると
+     アクターのメソッドが二度走る。(送り主, reqid) で最後の答えを覚え、
+     同じものが来たら実行せずに返す。 *)
+  let answered : (string * string, string) Hashtbl.t = Hashtbl.create 16 in
   let buf = Bytes.create 2048 in
   while true do
     try
@@ -986,8 +990,15 @@ let remote_listener rt =
         match parts with
         | id :: actor :: meth :: argl ->
             let arg = String.concat " " argl in
+            let key =
+              (match from with
+               | Unix.ADDR_INET (a, _) -> Unix.string_of_inet_addr a
+               | _ -> "?"), id in
             (* 公開名は "/echo" で登録されている。両方の書き方を受ける。 *)
             let v =
+              match Hashtbl.find_opt answered key with
+              | Some prev -> prev
+              | None ->
               match Avm.remote_dispatch rt actor meth (if arg = "" then [] else [arg]) with
               | Some r -> r
               | None ->
@@ -995,6 +1006,7 @@ let remote_listener rt =
                          (if arg = "" then [] else [arg]) with
                  | Some r -> r
                  | None -> "err") in
+            Hashtbl.replace answered key v;
             let r = Printf.sprintf "R %s %s\n" id v in
             ignore (Unix.sendto sock (Bytes.of_string r) 0 (String.length r) [] from)
         | _ -> ()

@@ -189,11 +189,22 @@ let remote_xfer host actor meth arg timeout_ms : string option =
     else begin
       let buf = Bytes.create 1024 in
       let deadline = Unix.gettimeofday () +. float_of_int timeout_ms /. 1000.0 in
+      (* UDP なので落ちる。200ms ごとに出し直す。相手は (送り主, reqid) の
+         控えを持つので、相手のメソッドが二度走ることはない。 *)
+      let last_tx = ref (Unix.gettimeofday ()) in
       let rec loop () =
-        let left = deadline -. Unix.gettimeofday () in
+        let now = Unix.gettimeofday () in
+        let left = deadline -. now in
         if left <= 0.0 then None
-        else match Unix.select [sock] [] [] left with
-          | ([], _, _) -> None
+        else begin
+          if now -. !last_tx >= 0.2 then begin
+            (try ignore (Unix.sendto sock (Bytes.of_string q) 0 (String.length q) [] addr)
+             with _ -> ());
+            last_tx := now
+          end;
+          let wait = if left < 0.2 then left else 0.2 in
+          match Unix.select [sock] [] [] wait with
+          | ([], _, _) -> loop ()
           | _ ->
             let (n, _) = Unix.recvfrom sock buf 0 (Bytes.length buf) [] in
             let line = String.trim (Bytes.sub_string buf 0 n) in
@@ -206,7 +217,8 @@ let remote_xfer host actor meth arg timeout_ms : string option =
                   if gid = id then Some (String.sub rest (k+1) (String.length rest - k - 1))
                   else loop ()
               | None -> loop ()
-            end else loop () in
+            end else loop ()
+        end in
       let r = loop () in fin (); r
     end
   with _ -> fin (); None)
