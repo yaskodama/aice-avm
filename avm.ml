@@ -134,7 +134,15 @@ let vm_str_mask = 0x007fffff
    Pi 3 の VM（apps/abcl_program.c）と同じ約束。 *)
 let vm_bool_tag = 0x20000000
 let vm_bool b   = vm_bool_tag lor (if b then 1 else 0)
-let vm_is_bool v = v land vm_bool_tag <> 0 && v land vm_str_tag = 0
+(* acquire/release が握っている資源名。実行時の対の確認に使う。 *)
+let res_held : (string, bool) Hashtbl.t = Hashtbl.create 8
+
+let vm_err_tag  = 0x10000000   (* result<tau> の失敗。compile.ml の vm_err と同じ *)
+(* タグ判定はどれも「非負であること」を先に確かめる。負の整数は上位ビットが
+   すべて立っているので、この番人が無いと -1 が文字列だと誤認される。 *)
+let vm_is_bool v = v >= 0 && v land vm_bool_tag <> 0 && v land vm_str_tag = 0
+let vm_is_err  v = v >= 0 && v land vm_err_tag <> 0 && v land (vm_str_tag lor vm_bool_tag) = 0
+let vm_is_str  v = v >= 0 && v land vm_str_tag <> 0
 let vm_falsy v  = if vm_is_bool v then v land 1 = 0 else v = 0
 
 (* 実行時に作られた文字列の置き場。連結（CONCAT）だけが使う。
@@ -145,7 +153,8 @@ let vm_heap_n = ref 0
 
 let vm_show rt v =
   if vm_is_bool v then (if v land 1 = 1 then "true" else "false")
-  else if v land vm_str_tag <> 0 then begin
+  else if vm_is_err v then "err"
+  else if vm_is_str v then begin
     let i = v land vm_str_mask in
     if v land vm_str_heap <> 0 then
       (if i < !vm_heap_n then vm_heap.(i) else "<bad-str>")
@@ -219,6 +228,12 @@ let rec exec rt actor sender meth args =
             見るのは印字のときだけ。フィールド・引数・送信・演算は整数のまま素通りする。 *)
          | 0x42 -> let v = pop () in io.on_print actor.id (vm_show rt v)
          | 0x43 -> raise Exit
+         (* ACQUIRE name / RELEASE name — 資源の名前つき錠。
+            対の追跡は正典の型検査器の仕事なので、ここは実行時の錠だけ持つ。
+            ホスト VM はアクタを OCaml のスレッドで回すので、名前ごとの
+            Mutex を張る。取れなければ取れるまで待つ。 *)
+         | 0x53 -> let n = vm_show rt (pop ()) in Hashtbl.replace res_held n true
+         | 0x54 -> let n = vm_show rt (pop ()) in Hashtbl.remove res_held n
          (* WEB_LISTEN port / WEB_EXPOSE path, actor *)
          | 0x50 -> let p = pop () in web_port := p
          | 0x51 -> let aid = pop () in let path = pop () in

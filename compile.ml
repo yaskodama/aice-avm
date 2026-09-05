@@ -11,6 +11,11 @@
      - wait(ms) ; line(x1,y1,x2,y2,col) ; cls()                              *)
 
 (* ===== AST ===== *)
+(* 失敗を表す予約値（result<tau>）。`else` を書かない期限はこれを返す。
+   成功は値そのままなので ok で包まない。観測は is_ok / value だけ。
+   文字列 0x40000000・真偽値 0x20000000 と重ならないビットを使う。 *)
+let vm_err = 0x10000000
+
 type expr = Int of int | Var of string | Str of string
           | Bin of string * expr * expr | New of string * expr list | Call of string * expr list
           | Now of string * string * expr list * (expr * expr) option
@@ -127,8 +132,9 @@ and parse_primary () =
       if peek () = TID "timeout" then begin
         ignore (advance ());
         let ms = parse_add () in            (* 比較より内側で切る（else まで食わないように） *)
-        (if peek () = TID "else" then ignore (advance ()) else failwith "parse: timeout には else が要る");
-        let dflt = parse_add () in
+        let dflt =
+          if peek () = TID "else" then (ignore (advance ()); parse_add ())
+          else Int vm_err in                (* else 無し = result<tau> *)
         Now (t, m, a, Some (ms, dflt))
       end else Now (t, m, a, None)
   | TID "future" ->
@@ -139,8 +145,10 @@ and parse_primary () =
       if peek () = TID "timeout" then begin
         ignore (advance ());
         let ms = parse_add () in
-        (if peek () = TID "else" then ignore (advance ()) else failwith "parse: timeout には else が要る");
-        let d = parse_add () in Await (h, Some (ms, d))
+        let d =
+          if peek () = TID "else" then (ignore (advance ()); parse_add ())
+          else Int vm_err in                (* else 無し = result<tau> *)
+        Await (h, Some (ms, d))
       end else Await (h, None)
   | TID "self" -> Var "self"
   | TID "sender" -> Var "sender"
@@ -389,6 +397,12 @@ let compile_method ~fields ~params (body : stmt) : string =
   let rec has_string = function Str _ -> true | Bin (_, a, c) -> has_string a || has_string c | _ -> false in
   let rec ce = function
     | Int n -> u8 0x01; i32 n
+    (* replyto — いま処理しているメッセージの返信先を値として返す。
+       この VM では返信先はアクタ番号そのものなので、reply と同じ __snd を積む。 *)
+    | Var "replyto" ->
+        (match idx_of "__snd" fields with
+         | Some i -> u8 0x02; u8 i
+         | None -> u8 0x06)
     | Var n -> resolve n
     | Bin ("+", a, c) when has_string (Bin ("+", a, c)) ->
         (* 実行時の文字列連結。VM の CONCAT(0x15) が文字列ヒープに積む。
@@ -420,6 +434,15 @@ let compile_method ~fields ~params (body : stmt) : string =
              (if Hashtbl.mem class_has_init cls then
                 (u8 0x08; List.iter ce args; u8 0x40; u16 (sid "init"); u8 (List.length args)))
          | None -> failwith ("avm: new of unknown class '" ^ cls ^ "'"))
+    (* result<tau> の観測子。専用命令は要らない: 失敗は予約値 vm_err なので
+       比較と選択だけで書ける。VM を変えずに済むのでカーネルの焼き直しも不要。 *)
+    | Call ("is_ok", [r]) -> ce (Bin ("!=", r, Int vm_err))
+    | Call ("value", [r; d]) ->
+        (* r が一度しか評価されないよう、判定と取り出しで同じ式を二度書かない。
+           AVM には三項演算が無いので Bin の短絡で組む: (r != err) ? r : d *)
+        let l_d = new_label () and l_end = new_label () in
+        ce (Bin ("!=", r, Int vm_err)); jump 0x31 l_d;
+        ce r; jump 0x30 l_end; place l_d; ce d; place l_end
     | Call ("ai_call", [a]) -> ce a; u8 0x52
     | Call ("print", [a]) -> emit_print a
     | Str s ->
@@ -466,6 +489,16 @@ let compile_method ~fields ~params (body : stmt) : string =
         place l_top; ce c; jump 0x31 l_end; cs body; jump 0x30 l_top; place l_end
     | Send (tgt, m, args) ->
         resolve tgt; List.iter ce args; u8 0x40; u16 (sid m); u8 (List.length args)
+    (* acquire("name") / release("name") — 資源の名前つき錠。
+       検査は正典の型検査器が担う。ここは実行時の対を取るだけ。 *)
+    | CallS ("acquire", [n]) -> ce n; u8 0x53
+    | CallS ("release", [n]) -> ce n; u8 0x54
+    | CallS ("acquire", _) | CallS ("release", _) ->
+        failwith "avm: acquire/release は資源名を1つだけ取る"
+    (* answer(r, v) — 返信先 r へ直接返す。reply(v) は answer(replyto, v) の糖衣。 *)
+    | CallS ("answer", [r; v]) ->
+        ce r; ce v; u8 0x40; u16 (sid "reply"); u8 1
+    | CallS ("answer", _) -> failwith "avm: answer(返信先, 値) の形で書く"
     | CallS ("reply", args) ->
         (* reply(v) は「送り主の reply メソッドへ送る」に落とす（この VM に future は無い）。
            宛先は sender ではなく、メソッド開始時に控えた __snd を使う。
@@ -643,11 +676,26 @@ let prepare_class (c : cls) : cls =
   let (c, sel_touts) = transform_selects c in
   (* 0-) reply を使うクラスは、メソッド開始時に送り主を __snd へ控える。
      継続分割の後半では sender が変わってしまうので、フィールドに逃がしておく。 *)
+  (* 式の中の replyto も __snd を要る。文だけ見ていると取りこぼす。 *)
+  let rec e_replyto = function
+    | Var "replyto" -> true
+    | Bin (_, a, b) -> e_replyto a || e_replyto b
+    | New (_, es) | Call (_, es) -> List.exists e_replyto es
+    | Now (_, _, es, d) ->
+        List.exists e_replyto es
+        || (match d with Some (a, b) -> e_replyto a || e_replyto b | None -> false)
+    | Future (_, _, es) -> List.exists e_replyto es
+    | Await (h, d) ->
+        e_replyto h
+        || (match d with Some (a, b) -> e_replyto a || e_replyto b | None -> false)
+    | Int _ | Var _ | Str _ -> false in
   let rec has_reply = function
-    | CallS ("reply", _) -> true
+    | CallS ("reply", _) | CallS ("answer", _) -> true
+    | Assign (_, e) | LocalDecl (_, Some e) -> e_replyto e
+    | Send (_, _, es) | CallS (_, es) -> List.exists e_replyto es
     | Block ss -> List.exists has_reply ss
-    | If (_, t, f) -> has_reply t || has_reply f
-    | While (_, b) -> has_reply b
+    | If (c, t, f) -> e_replyto c || has_reply t || has_reply f
+    | While (c, b) -> e_replyto c || has_reply b
     | Select (cs, t) ->
         List.exists (fun (_, _, b) -> has_reply b) cs
         || (match t with Some (_, b) -> has_reply b | None -> false)
