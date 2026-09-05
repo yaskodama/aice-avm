@@ -189,10 +189,20 @@ let rec parse_stmt () =
       if peek () = TID "else" then (ignore (advance ()); If (c, t, parse_stmt ()))
       else If (c, t, Nop)
   | TID "while" ->
-      ignore (advance ()); expect LP; let c = parse_expr () in expect RP;
-      expect (TID "do"); While (c, parse_stmt ())
-  | TID "send" ->
+      (* 正典は `while c do`（括弧なし）。以前は括弧を必須にしていたので、
+         正典どおりに書いたものが通らなかった。どちらも受ける。 *)
       ignore (advance ());
+      let c =
+        if peek () = LP then (ignore (advance ());
+                              let e = parse_expr () in expect RP; e)
+        else parse_expr () in
+      (if peek () = TID "do" then ignore (advance ()));
+      While (c, parse_stmt ())
+  | TID "send" ->
+      (* `send!` は「検査を緩めた送信」。この VM は静的検査をしないので、
+         配送の意味は `send` と同じ。'!' を読み飛ばす。 *)
+      ignore (advance ());
+      (if peek () = BANG then ignore (advance ()));
       let tgt = id () in expect DOT; let m = id () in
       expect LP; let a = parse_args () in expect RP; expect SEMI; Send (tgt, m, a)
   | TID "call" ->
