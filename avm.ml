@@ -338,6 +338,17 @@ let rec exec rt actor sender meth args =
          | 0x5C -> let n = pop () in
              let n = if vm_is_flt n then int_of_float (vm_fltval n) else n in
              push (vm_mklst (Array.make (max n 0) 0))
+         (* TYPEOF: 実行時の型を文字列で返す。名前は正典の綴りに合わせる。 *)
+         | 0x5F ->
+             let v = pop () in
+             let t =
+               if vm_is_bool v then "bool"
+               else if vm_is_str v then "string"
+               else if vm_is_flt v then "float"
+               else if vm_is_lst v then "array"
+               else if vm_is_err v then "unit"
+               else "int" in
+             push (vm_intern_fwd t)
          (* 数学組込み。番号は compile.ml / abcl_program.c と揃える *)
          | 0x5D ->
              let k = Char.code (Bytes.get code !pc) in incr pc;

@@ -344,7 +344,9 @@ let parse_class () =
   let fields = ref [] and meths = ref [] and finits = ref [] in
   while peek () <> RB do
     match peek () with
-    | TID "var" ->
+    (* `float x = 1.5;` — 正典では float は予約語で、var とは別の宣言になる
+       （型注釈の位置にも書ける）。中身は var と同じに扱えばよい。 *)
+    | TID "float" | TID "var" ->
         ignore (advance ()); let f = id () in
         skip_type_ann_stmt ();
         (if peek () = ASSIGN then begin
@@ -508,14 +510,23 @@ let compile_method ~fields ~params (body : stmt) : string =
     | Call ("array_set", [a; i; e]) -> ce a; ce i; ce e; u8 0x5A
     | Call ("array_len", [a]) -> ce a; u8 0x5B
     | Call ("array_zeros", [nn]) -> ce nn; u8 0x5C
+    (* timed_out(r) — result の失敗かどうか。is_ok の裏返しだが、正典では
+       別の名前で観測できる（第三の観測子）。命令は増えていない。 *)
+    | Call ("timed_out", [r]) -> ce (Bin ("==", r, Int vm_err))
+    (* typeof(x) — 実行時の型を文字列で返す。新命令 0x5F。 *)
+    | Call ("typeof", [x]) -> ce x; u8 0x5F
+    (* ★ neg だけは正典で int -> int と float -> float の両方がある。
+       他（abs/floor/ceil/round）は float -> float なので実数のままでよい。
+       ここを数学組込みと同じ扱いにすると neg(5) が -5.000000 になる。 *)
+    | Call ("neg", [a]) -> ce (Bin ("-", Int 0, a))
     (* 数学組込み。番号は abcl_program.c の switch と揃えること。 *)
     | Call (("sqrt"|"exp"|"log"|"log10"|"sin"|"cos"|"tan"|"asin"|"acos"
-            |"atan"|"floor"|"ceil"|"round"|"abs"|"neg") as fn, [a]) ->
+            |"atan"|"floor"|"ceil"|"round"|"abs") as fn, [a]) ->
         let k = match fn with
           | "sqrt" -> 0 | "exp" -> 1 | "log" -> 2 | "log10" -> 3
           | "sin" -> 4 | "cos" -> 5 | "tan" -> 6 | "asin" -> 7
           | "acos" -> 8 | "atan" -> 9 | "floor" -> 10 | "ceil" -> 11
-          | "round" -> 12 | "abs" -> 13 | _ -> 14 in
+          | "round" -> 12 | _ -> 13 in
         ce a; u8 0x5D; u8 k
     | Call ("is_ok", [r]) -> ce (Bin ("!=", r, Int vm_err))
     | Call ("value", [r; d]) ->
