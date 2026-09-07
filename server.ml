@@ -968,6 +968,7 @@ let make_listen port =
 let remote_listener rt =
   let sock = Unix.socket Unix.PF_INET Unix.SOCK_DGRAM 0 in
   (try Unix.setsockopt sock Unix.SO_REUSEADDR true with _ -> ());
+  (try Unix.setsockopt sock Unix.SO_BROADCAST true with _ -> ());
   (try
     Unix.bind sock (Unix.ADDR_INET (Unix.inet_addr_any, 9010));
     Printf.printf "[aice-avm] AIPL remote listening on UDP 9010\n%!"
@@ -1007,9 +1008,21 @@ let remote_listener rt =
                  | Some r -> r
                  | None -> "err") in
             Hashtbl.replace answered key v;
-            let r = Printf.sprintf "R %s %s\n" id v in
-            ignore (Unix.sendto sock (Bytes.of_string r) 0 (String.length r) [] from)
+            (* reqid 0 は broadcast(...) の印。返事を出さない。
+               ここで返すと、撒いた一通に対して全員が返して嵐になる。 *)
+            if id <> "0" then begin
+              let r = Printf.sprintf "R %s %s\n" id v in
+              ignore (Unix.sendto sock (Bytes.of_string r) 0 (String.length r) [] from)
+            end
         | _ -> ()
+      end
+      (* H <id> — neighbors() の呼びかけ。居ることだけを単送で返す。
+         同報で来るので、自分が撒いた物が自分に戻ることがある。
+         それは呼んだ側が自分の IP を落として捨てる。 *)
+      else if String.length line > 1 && line.[0] = 'H' && line.[1] = ' ' then begin
+        let id = String.trim (String.sub line 2 (String.length line - 2)) in
+        let a = Printf.sprintf "A %s\n" id in
+        ignore (Unix.sendto sock (Bytes.of_string a) 0 (String.length a) [] from)
       end
     with _ -> ()
   done

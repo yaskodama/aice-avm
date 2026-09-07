@@ -504,6 +504,11 @@ let compile_method ~fields ~params (body : stmt) : string =
           u8 (Int64.to_int (Int64.logand (Int64.shift_right_logical bits (8 * k)) 0xFFL))
         done
     (* 配列（正典 array_*）。命令番号は abcl_program.c と揃えること。 *)
+    (* メッシュの三つ。宛先を書かずに同報で撒く（UDP/9010）。
+       戻りが配列なのは、全員から返らないのが普通だからである。 *)
+    | Call ("neighbors", []) -> u8 0x60
+    | Call ("broadcast", [sv; m; g]) -> ce sv; ce m; ce g; u8 0x61
+    | Call ("gather", [sv; m; g; ms]) -> ce sv; ce m; ce g; ce ms; u8 0x62
     | Call ("array_empty", []) -> u8 0x57
     | Call ("array_push", [a; e]) -> ce a; ce e; u8 0x58
     | Call ("array_get", [a; i]) -> ce a; ce i; u8 0x59

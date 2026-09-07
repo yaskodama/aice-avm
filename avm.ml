@@ -248,6 +248,119 @@ let remote_xfer host actor meth arg timeout_ms : string option =
     end
   with _ -> fin (); None)
 
+(* ===== メッシュの三つ — neighbors / broadcast / gather ==========================
+   remote(...) は「住所を一つ書いて同期に呼ぶ」形なので、経路が動くメッシュとは
+   噛み合わない。ここでは宛先表を持たず、同じ UDP/9010 に同報で撒く。
+
+     H <id>            誰かいますか（同報）。受けた側は A <id> を単送で返す
+     A <id>            います（送り主の IP が答そのもの）
+     Q 0 <..>          reqid 0 は「返事は要らない」。撒いても返信の嵐にならない
+     Q <id> <..>       同報で問い、期限まで R を拾う。送り主ごとに一つだけ採る
+
+   実機 3 台も同じ電文を話す。宛先表が無いので、途中で誰が消えても壊れない。 *)
+
+let mesh_bcast_addr = ref "192.168.3.255"
+let mesh_next_id = ref 10000
+
+(* 自分が撒いた物が自分に返ってくることがある。自分の IP は答に混ぜない。 *)
+let mesh_self_ips () =
+  let acc = ref [] in
+  (try
+     let ic = Unix.open_process_in "ifconfig 2>/dev/null" in
+     (try while true do
+        let l = input_line ic in
+        let l = String.trim l in
+        if String.length l > 5 && String.sub l 0 5 = "inet " then
+          (match String.index_opt (String.sub l 5 (String.length l - 5)) ' ' with
+           | Some k -> acc := String.sub l 5 k :: !acc
+           | None -> ())
+      done with End_of_file -> ());
+     ignore (Unix.close_process_in ic)
+   with _ -> ());
+  !acc
+
+let mesh_open () =
+  let sock = Unix.socket Unix.PF_INET Unix.SOCK_DGRAM 0 in
+  (try Unix.setsockopt sock Unix.SO_BROADCAST true with _ -> ());
+  sock
+
+let mesh_sendto sock line =
+  let addr = Unix.ADDR_INET (Unix.inet_addr_of_string !mesh_bcast_addr, 9010) in
+  (try ignore (Unix.sendto sock (Bytes.of_string line) 0 (String.length line) [] addr)
+   with _ -> ())
+
+(* 撒いて、期限まで拾う。keep が Some を返した行だけを (送り主, 値) で集める。
+   同じ送り主からは最初の一つだけ。UDP なので 200ms ごとに出し直す。 *)
+let mesh_collect line timeout_ms (keep : string -> string option) : (string * string) list =
+  let sock = mesh_open () in
+  let mine = mesh_self_ips () in
+  let got : (string, string) Hashtbl.t = Hashtbl.create 8 in
+  let order = ref [] in
+  (try
+     mesh_sendto sock line;
+     let buf = Bytes.create 1024 in
+     let deadline = Unix.gettimeofday () +. float_of_int timeout_ms /. 1000.0 in
+     let last_tx = ref (Unix.gettimeofday ()) in
+     let rec loop () =
+       let now = Unix.gettimeofday () in
+       let left = deadline -. now in
+       if left <= 0.0 then ()
+       else begin
+         if now -. !last_tx >= 0.2 then (mesh_sendto sock line; last_tx := now);
+         let wait = if left < 0.2 then left else 0.2 in
+         (match Unix.select [sock] [] [] wait with
+          | ([], _, _) -> ()
+          | _ ->
+            let (n, from) = Unix.recvfrom sock buf 0 (Bytes.length buf) [] in
+            let who = (match from with
+                       | Unix.ADDR_INET (a, _) -> Unix.string_of_inet_addr a
+                       | _ -> "") in
+            let txt = String.trim (Bytes.sub_string buf 0 n) in
+            if who <> "" && not (List.mem who mine) && not (Hashtbl.mem got who) then
+              (match keep txt with
+               | Some v -> Hashtbl.replace got who v; order := who :: !order
+               | None -> ()));
+         loop ()
+       end in
+     loop ()
+   with _ -> ());
+  (try Unix.close sock with _ -> ());
+  List.rev_map (fun ip -> (ip, Hashtbl.find got ip)) !order
+
+(* "X <id> <残り>" の形を割る。id が合わなければ None *)
+let mesh_split_id kind id txt =
+  if String.length txt > 2 && txt.[0] = kind && txt.[1] = ' ' then begin
+    let rest = String.sub txt 2 (String.length txt - 2) in
+    match String.index_opt rest ' ' with
+    | Some k ->
+      if (try int_of_string (String.sub rest 0 k) = id with _ -> false)
+      then Some (String.sub rest (k+1) (String.length rest - k - 1)) else None
+    | None -> if (try int_of_string rest = id with _ -> false) then Some "" else None
+  end else None
+
+(* neighbors() — 撒いて 300ms 待ち、返事をくれた相手の IP を並べる。
+   「今つながっている相手」であって、過去に見た相手ではない。 *)
+let mesh_neighbors () : string list =
+  let id = !mesh_next_id in incr mesh_next_id;
+  let q = Printf.sprintf "H %d\n" id in
+  List.map fst (mesh_collect q 1000 (fun t ->
+    match mesh_split_id 'A' id t with Some _ -> Some "" | None -> None))
+
+(* broadcast(...) — reqid 0 で撒くだけ。返事は求めない *)
+let mesh_broadcast svc meth arg =
+  let sock = mesh_open () in
+  let q = Printf.sprintf "Q 0 %s %s %s\n" svc meth arg in
+  mesh_sendto sock q; mesh_sendto sock q;   (* UDP なので二度撒く *)
+  (try Unix.close sock with _ -> ())
+
+(* gather(...) — 同報で問い、期限までに届いた分だけ返す。
+   全員から返る保証は無い。だから戻りは配列である。 *)
+let mesh_gather svc meth arg ms : string list =
+  let id = !mesh_next_id in incr mesh_next_id;
+  let q = Printf.sprintf "Q %d %s %s %s\n" id svc meth arg in
+  List.map snd (mesh_collect q (if ms > 0 then ms else 1)
+                  (fun t -> mesh_split_id 'R' id t))
+
 let vm_intern_fwd_ref : (string -> int) ref = ref (fun _ -> 0)
 let vm_intern_fwd s = !vm_intern_fwd_ref s
 
@@ -403,6 +516,29 @@ let rec exec rt actor sender meth args =
                   let v = vm_remote_value rt t in
                   push (if v = vm_err_tag then dflt else v)
               | None -> push dflt)
+         (* MESH_NEIGHBORS / MESH_BROADCAST / MESH_GATHER。
+            実機 3 台と同じ電文（UDP/9010 に同報）。宛先表は持たない。 *)
+         | 0x60 ->
+             let ips = (try mesh_neighbors () with _ -> []) in
+             push (vm_mklst (Array.of_list (List.map vm_intern_fwd ips)))
+         | 0x61 ->
+             let arg  = vm_show rt (pop ()) in
+             let meth = vm_show rt (pop ()) in
+             let svc  = vm_show rt (pop ()) in
+             (try mesh_broadcast svc meth arg with _ -> ())
+         | 0x62 ->
+             let ms   = pop () in
+             let arg  = vm_show rt (pop ()) in
+             let meth = vm_show rt (pop ()) in
+             let svc  = vm_show rt (pop ()) in
+             let vs = (try mesh_gather svc meth arg ms with _ -> []) in
+             (* 相手が err を返したもの（そのアクタが居ない板）は入れない。
+                「届かなかった」と「持っていなかった」を配列の上で区別しない
+                のが gather の約束である。 *)
+             let ns = List.filter_map (fun t ->
+                        let v = vm_remote_value rt t in
+                        if v = vm_err_tag then None else Some v) vs in
+             push (vm_mklst (Array.of_list ns))
          | 0x53 -> let n = vm_show rt (pop ()) in Hashtbl.replace res_held n true
          | 0x54 -> let n = vm_show rt (pop ()) in Hashtbl.remove res_held n
          (* WEB_LISTEN port / WEB_EXPOSE path, actor *)
@@ -598,6 +734,7 @@ let disassemble (data : bytes) : string =
             | 0x05 -> "SELF" | 0x06 -> "SENDER" | 0x07 -> "WAIT" | 0x08 -> "DUP"
             | 0x10 -> "ADD" | 0x11 -> "SUB" | 0x12 -> "MUL" | 0x13 -> "DIV" | 0x14 -> "MOD"
             | 0x15 -> "CONCAT"
+            | 0x60 -> "NEIGHBORS" | 0x61 -> "BROADCAST" | 0x62 -> "GATHER"
             | 0x50 -> "WEBLISTEN" | 0x51 -> "WEBEXPOSE"
             | 0x20 -> "LT" | 0x21 -> "LE" | 0x22 -> "GT" | 0x23 -> "GE" | 0x24 -> "EQ" | 0x25 -> "NE"
             | 0x30 -> Printf.sprintf "JMP     -> %d" (rd16 ())
