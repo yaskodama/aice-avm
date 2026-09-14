@@ -2509,7 +2509,11 @@
         try {
           const st = JSON.parse(r.responseText);
           if (st.file && st.file !== file) { file = st.file; loadSrc(file); }
-          if (st.seq !== seq) { seq = st.seq; if (st.line > 0) { curLine = st.line; curActor = st.actor; mark(st.line, st.actor); } }
+          if (st.seq !== seq) {
+            seq = st.seq;
+            if (st.line > 0) { curLine = st.line; curActor = st.actor; mark(st.line, st.actor); }
+            else if (st.file) { curLine = 0; loadSrc(st.file); }     // "SRC": a (re)loaded program — re-read the text
+          }
           if (st.age_ms > 3000 && lastLine > 0) foot.textContent = 'line ' + lastLine + '   (idle ' + (st.age_ms / 1000 | 0) + ' s)';
         } catch (e) { /* server restarting */ }
       };
