@@ -33,6 +33,14 @@
   function focusWindowFromHash() {
     const key = (location.hash || '').replace('#', '').toLowerCase();
     if (!key) return;
+    if (key === 'arm' || key === 'aipl') {   // deep-links: /#arm = DOFBOT window (+ program), /#aipl = program only
+      setTimeout(() => {
+        const has = (t) => windows.some((w) => w.win.querySelector('.t').textContent === t);
+        if (key === 'arm' && !has('DOFBOT arm')) openArm({ x: 20, y: 30 });
+        if (!has('AIPL program')) openAiplProgram({});
+      }, 600);
+      return;
+    }
     const titles = { vmg: 'VM Graphics', graphics: 'VM Graphics', finder: 'avm Finder',
       avm: 'avm Finder', display: '3D Display', basic: 'BASIC', console: 'Xinu Console' };
     const want = titles[key];
@@ -173,6 +181,8 @@
       { label: '📝  BASIC',          act: () => openBasic({ x: px, y: py }) },
       { label: '🧊  avm Finder',     act: () => openAvmFinder({ x: px, y: py }) },
       { label: '📥  AVM 受信箱 (Inbox)', act: () => openInbox({ x: px, y: py }) },
+      { label: '🦾  アーム (DOFBOT)',  act: () => openArm({ x: px, y: py }) },
+      { label: '📜  AIPL プログラム',   act: () => openAiplProgram({ x: px, y: py }) },
     ];
     items.forEach((it) => {
       const el = document.createElement('div');
@@ -2209,8 +2219,8 @@
     return { x: x1, y: p.y * cx - z1 * sx, z: p.y * sx + z1 * cx };
   }
 
-  function render3d(ctx, canvas, mesh, ay, ax, solid) {
-    const W = canvas.width, H = canvas.height, cam = 6, f = 300, S = 0.9;
+  function render3d(ctx, canvas, mesh, ay, ax, solid, fscale) {
+    const W = canvas.width, H = canvas.height, cam = 6, f = 300 * (fscale || 1), S = 0.9;
     ctx.fillStyle = '#05080e'; ctx.fillRect(0, 0, W, H);
     const rv = mesh.verts.map((p) => rotPoint({ x: p.x * S, y: p.y * S, z: p.z * S }, ay, ax));
     const proj = rv.map((p) => { const zz = p.z + cam; return { x: W / 2 + f * p.x / zz, y: H / 2 - f * p.y / zz, z: zz }; });
@@ -2275,6 +2285,238 @@
       requestAnimationFrame(frame);
     })();
     xlog('[3d] Blender display started (' + mesh.name + ')', 'boot-ok');
+  }
+
+  // ---- DOFBOT arm simulator ---------------------------------------------
+  // A window with (left) a software-3D model of the Yahboom DOFBOT drawn from
+  // the six servo angles with the URDF link lengths, (right) the live camera
+  // of the Linux Pi 5 (cam_service.py, GET /snap.jpg), and (bottom) six
+  // sliders.  "送信" writes the pose to the real arm through the server's
+  // /api/arm proxy (-> Xinu board /arm), "読む" reads it back, "同期" polls.
+  const ARM_GEO = { H: 0.1075, L: 0.08285, L3: 0.07385, LG: 0.06, BASE: 0.066 };
+  function armFk(s) {
+    // Servo conventions (Arm_Lib): A1 = 90-s2 from vertical (forward +),
+    // A2 = A1 + (90-s3), A3 = A2 + (90-s4).  yaw = s1-90 about the vertical.
+    const d2r = Math.PI / 180;
+    const A1 = (90 - s[1]) * d2r, A2 = A1 + (90 - s[2]) * d2r, A3 = A2 + (90 - s[3]) * d2r;
+    const yaw = (s[0] - 90) * d2r;
+    const f = { x: Math.cos(yaw), y: 0, z: -Math.sin(yaw) };           // forward
+    const l = { x: Math.sin(yaw), y: 0, z:  Math.cos(yaw) };           // lateral (left)
+    const up = { x: 0, y: 1, z: 0 };
+    const dir = (A) => ({ x: f.x * Math.sin(A), y: Math.cos(A), z: f.z * Math.sin(A) });
+    const add = (p, d, k) => ({ x: p.x + d.x * k, y: p.y + d.y * k, z: p.z + d.z * k });
+    const P1 = { x: 0, y: ARM_GEO.H, z: 0 };
+    const P2 = add(P1, dir(A1), ARM_GEO.L);
+    const P3 = add(P2, dir(A2), ARM_GEO.L);
+    const P5 = add(P3, dir(A3), ARM_GEO.L3);
+    const PG = add(P5, dir(A3), ARM_GEO.LG);
+    return { f, l, up, P1, P2, P3, P5, PG, d1: dir(A1), d2: dir(A2), d3: dir(A3), yaw };
+  }
+  function armMesh(s) {
+    const m = meshBuilder(); m.name = 'DOFBOT';
+    const K = 9;                                   // metres -> display units
+    const k = armFk(s);
+    const v3 = (p) => ({ x: p.x * K, y: p.y * K - 1.4, z: p.z * K });
+    const cross = (a, b) => v3cross(a, b);
+    // oriented box from P along d (length L), thickness t (lateral l, normal n)
+    function segBox(P, d, L, t, color, lat) {
+      const n = v3norm(cross(d, lat));
+      const b = m.verts.length;
+      [[0, -1, -1], [1, -1, -1], [1, 1, -1], [0, 1, -1], [0, -1, 1], [1, -1, 1], [1, 1, 1], [0, 1, 1]].forEach((q) => {
+        const u = q[0] * L, v = q[1] * t / 2, w = q[2] * t / 2;
+        m.verts.push(v3({ x: P.x + d.x * u + lat.x * v + n.x * w, y: P.y + d.y * u + lat.y * v + n.y * w, z: P.z + d.z * u + lat.z * v + n.z * w }));
+      });
+      [[0, 1, 2, 3], [5, 4, 7, 6], [4, 0, 3, 7], [1, 5, 6, 2], [3, 2, 6, 7], [4, 5, 1, 0]].forEach((q) => m.faces.push({ idx: q.map((i) => b + i), color }));
+      [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]].forEach((e) => m.edges.push([b + e[0], b + e[1]]));
+    }
+    // table + base + turntable
+    const tb = m.verts.length;
+    [[-0.22, -0.006, -0.22], [0.34, -0.006, -0.22], [0.34, -0.006, 0.22], [-0.22, -0.006, 0.22],
+     [-0.22, 0, -0.22], [0.34, 0, -0.22], [0.34, 0, 0.22], [-0.22, 0, 0.22]].forEach((q) => m.verts.push(v3({ x: q[0], y: q[1], z: q[2] })));
+    [[0, 1, 2, 3], [5, 4, 7, 6], [4, 0, 3, 7], [1, 5, 6, 2], [3, 2, 6, 7], [4, 5, 1, 0]].forEach((q) => m.faces.push({ idx: q.map((i) => tb + i), color: '#5a3a22' }));
+    segBox({ x: 0, y: 0, z: 0 }, k.up, ARM_GEO.BASE, 0.09, '#3a4257', { x: 1, y: 0, z: 0 });
+    segBox({ x: 0, y: ARM_GEO.BASE, z: 0 }, k.up, ARM_GEO.H - ARM_GEO.BASE, 0.05, '#2f9e6f', k.l);
+    segBox(k.P1, k.d1, ARM_GEO.L, 0.032, '#2f9e6f', k.l);          // upper arm
+    segBox(k.P2, k.d2, ARM_GEO.L, 0.03, '#2f9e6f', k.l);           // forearm
+    segBox(k.P3, k.d3, ARM_GEO.L3, 0.034, '#2f9e6f', k.l);         // wrist link
+    // camera on the wrist link (outer side)
+    const camP = { x: k.P3.x + k.d3.x * 0.05, y: k.P3.y + k.d3.y * 0.05, z: k.P3.z + k.d3.z * 0.05 };
+    const n3 = v3norm(cross(k.d3, k.l));
+    segBox({ x: camP.x + n3.x * 0.022, y: camP.y + n3.y * 0.022, z: camP.z + n3.z * 0.022 }, k.d3, 0.025, 0.02, '#111318', k.l);
+    // gripper: two fingers, gap from s6 (30 open ≈ 5 cm, 135 closed ≈ 1 cm), rotated by s5-90 about the hand axis
+    const gap = Math.max(0.01, 0.05 - (s[5] - 30) / 105 * 0.04);
+    const r = (s[4] - 90) * Math.PI / 180;
+    const lat5 = v3norm({ x: k.l.x * Math.cos(r) + n3.x * Math.sin(r), y: k.l.y * Math.cos(r) + n3.y * Math.sin(r), z: k.l.z * Math.cos(r) + n3.z * Math.sin(r) });
+    [-1, 1].forEach((sg) => {
+      const P = { x: k.P5.x + lat5.x * sg * gap / 2, y: k.P5.y + lat5.y * sg * gap / 2, z: k.P5.z + lat5.z * sg * gap / 2 };
+      segBox(P, k.d3, ARM_GEO.LG, 0.008, '#c9a227', lat5);
+    });
+    return m;
+  }
+  function openArm(opts) {
+    const node = document.createElement('div');
+    node.className = 'basic-wrap';
+    node.style.cssText = 'display:flex;flex-direction:column;gap:6px;height:100%';
+    const slider = (i, name, max) =>
+      '<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#c0caf5"><span style="width:52px">' + name + '</span>' +
+      '<input type="range" class="a-s" data-i="' + i + '" min="0" max="' + max + '" value="' + (i === 5 ? 30 : 90) + '" style="flex:1">' +
+      '<span class="a-v" style="width:30px;text-align:right">' + (i === 5 ? 30 : 90) + '</span></label>';
+    node.innerHTML =
+      '<div style="display:flex;gap:6px;flex:1;min-height:0">' +
+      '<canvas class="a-canvas" width="300" height="240" style="background:#05080e;border:1px solid #2b3650;border-radius:8px;flex:1;min-width:0;cursor:grab"></canvas>' +
+      '<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:4px">' +
+      '<img class="a-cam" alt="camera" style="width:100%;flex:1;min-height:0;object-fit:contain;background:#05080e;border:1px solid #2b3650;border-radius:8px">' +
+      '<div style="display:flex;gap:4px;font-size:11px;color:#8b949e;align-items:center"><span>📷</span><input class="a-camurl" value="http://192.168.3.19:8090" style="flex:1;font-size:11px;background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px;padding:2px 4px"><span class="a-fps">–</span></div>' +
+      '</div></div>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px">' +
+      slider(0, '1 base', 180) + slider(1, '2 shoulder', 180) + slider(2, '3 elbow', 180) + slider(3, '4 wrist', 180) + slider(4, '5 roll', 270) + slider(5, '6 grip', 180) +
+      '</div>' +
+      '<div class="basic-toolbar" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
+      '<select class="a-target" style="font-size:11px;background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px"><option value="sim">模型 (simulator)</option><option value="real">実機 (Xinu board)</option></select>' +
+      '<span style="font-size:11px;color:#8b949e">🦾</span><input class="a-host" value="192.168.3.101" style="width:110px;font-size:11px;background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px;padding:2px 4px">' +
+      '<button data-act="send">送信 (pose)</button><button data-act="read">読む (read)</button>' +
+      '<label style="font-size:11px;color:#c0caf5"><input type="checkbox" class="a-sync"> 同期</label>' +
+      '<label style="font-size:11px;color:#c0caf5">ms <input class="a-ms" value="1000" style="width:48px;font-size:11px;background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px;padding:2px 4px"></label>' +
+      '<button data-act="home">全軸90°</button>' +
+      '</div>' +
+      '<div class="a-status" style="font-size:11px;color:#8b949e;white-space:pre;overflow:hidden;text-overflow:ellipsis">—</div>';
+    let alive = true;
+    // twice the original 760x560, clamped to the screen so it never opens off-screen
+    const W = Math.min(1520, Math.max(760, window.innerWidth * 0.6 - 30)), Hh = Math.min(1120, window.innerHeight - 80);
+    makeWindow({ title: 'DOFBOT arm', x: (opts && opts.x != null) ? Math.min(opts.x, window.innerWidth - W - 10) : 20,
+      y: (opts && opts.y != null) ? Math.min(opts.y, window.innerHeight - Hh - 40) : 30,
+      w: W, h: Hh, node, onClose: () => { alive = false; } });
+    node.style.fontSize = '15px';
+    node.querySelectorAll('label, input, select, button, .a-status').forEach((el) => { if (!el.classList.contains('a-s')) el.style.fontSize = '15px'; });
+    const canvas = node.querySelector('.a-canvas');
+    const ctx = canvas.getContext('2d');
+    const status = node.querySelector('.a-status');
+    const sliders = Array.from(node.querySelectorAll('.a-s'));
+    const vals = Array.from(node.querySelectorAll('.a-v'));
+    const angles = () => sliders.map((el) => parseInt(el.value, 10));
+    sliders.forEach((el, i) => el.addEventListener('input', () => { vals[i].textContent = el.value; }));
+    function setAngles(a) { a.forEach((v, i) => { if (Number.isFinite(v)) { sliders[i].value = v; vals[i].textContent = v; } }); }
+    let ay = 0.7, ax = -0.35, dragging = false, lx = 0, ly = 0;
+    canvas.addEventListener('mousedown', (e) => { dragging = true; lx = e.clientX; ly = e.clientY; });
+    window.addEventListener('mousemove', (e) => { if (!dragging) return; ay += (e.clientX - lx) * 0.01; ax += (e.clientY - ly) * 0.01; lx = e.clientX; ly = e.clientY; });
+    window.addEventListener('mouseup', () => { dragging = false; });
+    function fit() { const r = canvas.getBoundingClientRect(); if (r.width > 10) { canvas.width = r.width | 0; canvas.height = r.height | 0; } }
+    (function frame() {
+      if (!alive) return;
+      fit();
+      render3d(ctx, canvas, armMesh(angles()), ay, ax, true, Math.min(canvas.width, canvas.height) / 240 * 1.15);
+      requestAnimationFrame(frame);
+    })();
+    // target: the simulated arm inside this server (/api/arm/sim) or the real
+    // arm through the same-origin proxy (/api/arm -> Xinu board /arm)
+    const host = node.querySelector('.a-host'), target = node.querySelector('.a-target');
+    function arm(cmd, cb) {
+      const r = new XMLHttpRequest();
+      const q = cmd.trim().split(/\s+/).join('+');
+      r.open('GET', target.value === 'sim' ? '/api/arm/sim?cmd=' + q
+                                           : '/api/arm?host=' + encodeURIComponent(host.value.trim()) + '&cmd=' + q, true);
+      r.onload = () => { status.textContent = '> ' + cmd + '\n' + r.responseText.trim(); if (cb) cb(r.responseText); };
+      r.onerror = () => { status.textContent = '> ' + cmd + '\n(proxy error)'; };
+      r.send();
+    }
+    function readBack() {
+      arm('read', (t) => { const m = /angles\s+(.*)/.exec(t); if (!m) return;
+        const a = m[1].trim().split(/\s+/).map((x) => parseInt(x, 10)); setAngles(a); });
+    }
+    node.querySelector('[data-act=send]').addEventListener('click', () => arm('pose ' + angles().join(' ') + ' ' + (parseInt(node.querySelector('.a-ms').value, 10) || 1000)));
+    node.querySelector('[data-act=read]').addEventListener('click', readBack);
+    node.querySelector('[data-act=home]').addEventListener('click', () => { setAngles([90, 90, 90, 90, 90, 30]); arm('pose 90 90 90 90 90 30 2000'); });
+    const sync = node.querySelector('.a-sync');
+    (function pollArm() { if (!alive) return; if (sync.checked && target.value === 'real') readBack(); setTimeout(pollArm, 1500); })();
+    // the simulated arm: follow the server's motion (from/to/t0/ms) so a pose sent
+    // by AIPL (remote_call to 127.0.0.1:9010 "dofbot") animates here at 10 Hz
+    let simSeen = 0, simState = null;
+    (function pollSim() {
+      if (!alive) return;
+      const r = new XMLHttpRequest();
+      r.open('GET', '/api/arm/sim/state?t=' + Date.now(), true);
+      r.onload = () => { try { simState = JSON.parse(r.responseText); } catch (e) { simState = null; } };
+      r.send();
+      setTimeout(pollSim, 100);
+    })();
+    (function animSim() {
+      if (!alive) return;
+      if (simState && target.value === 'sim' && (simState.served !== simSeen || simState.age_ms < simState.ms + 300)) {
+        const k = simState.ms <= 0 ? 1 : Math.min(1, (simState.age_ms + (Date.now() - simState._at || 0)) / simState.ms);
+        if (simState._at == null) simState._at = Date.now();
+        setAngles(simState.from.map((f, i) => Math.round(f + (simState.to[i] - f) * k)));
+        if (simState.served !== simSeen) { simSeen = simState.served; status.textContent = '[sim] served=' + simSeen + '  to ' + simState.to.join(' ') + '  ms=' + simState.ms; }
+      }
+      requestAnimationFrame(animSim);
+    })();
+    // live camera: swap the snapshot ~5 times a second
+    const img = node.querySelector('.a-cam'), camurl = node.querySelector('.a-camurl'), fps = node.querySelector('.a-fps');
+    let shown = 0, t0 = Date.now();
+    img.addEventListener('load', () => { shown++; if (Date.now() - t0 > 2000) { fps.textContent = (shown * 1000 / (Date.now() - t0)).toFixed(1) + ' fps'; shown = 0; t0 = Date.now(); } });
+    img.addEventListener('error', () => { fps.textContent = 'no camera'; });
+    (function pollCam() { if (!alive) return; img.src = camurl.value.replace(/\/$/, '') + '/snap.jpg?t=' + Date.now(); setTimeout(pollCam, 200); })();
+    xlog('[arm] DOFBOT window opened (proxy /api/arm -> ' + host.value + ', camera ' + camurl.value + ')', 'boot-ok');
+  }
+
+  // ---- AIPL program window ------------------------------------------------
+  // Shows the AIPL source the canonical (OCaml) REPL is running and inverts the
+  // statement being executed right now.  The REPL sends "PC line col actor file"
+  // over UDP/9011 for every statement; the server keeps the latest and serves
+  // /api/aipl/state (10 Hz poll here) and /api/aipl/src?file= (the text).
+  function openAiplProgram(opts) {
+    const node = document.createElement('div');
+    node.style.cssText = 'display:flex;flex-direction:column;height:100%;gap:4px';
+    node.innerHTML =
+      '<div class="p-head" style="font-size:13px;color:#8b949e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">(no program yet — run the OCaml REPL)</div>' +
+      '<pre class="p-src" style="flex:1;min-height:0;margin:0;overflow:auto;background:#05080e;border:1px solid #2b3650;border-radius:8px;padding:6px 8px;font:14px/1.45 Menlo,monospace;color:#d8dee9"></pre>' +
+      '<div class="p-foot" style="font-size:13px;color:#8b949e">—</div>';
+    let alive = true;
+    const W = Math.min(760, Math.max(420, window.innerWidth * 0.37)), Hh = Math.min(1120, window.innerHeight - 80);
+    makeWindow({ title: 'AIPL program', x: (opts && opts.x != null) ? opts.x : Math.max(20, window.innerWidth - W - 30), y: (opts && opts.y != null) ? opts.y : 30,
+      w: W, h: Hh, node, onClose: () => { alive = false; } });
+    const head = node.querySelector('.p-head'), pre = node.querySelector('.p-src'), foot = node.querySelector('.p-foot');
+    let file = '', lines = [], lastLine = -1, seq = -1, curLine = 0, curActor = '';
+    function loadSrc(f) {
+      const r = new XMLHttpRequest();
+      r.open('GET', '/api/aipl/src?file=' + encodeURIComponent(f) + '&t=' + Date.now(), true);
+      r.onload = () => {
+        lines = r.responseText.replace(/\n$/, '').split('\n');
+        pre.innerHTML = lines.map((l, i) =>
+          '<div class="p-line" data-n="' + (i + 1) + '" style="white-space:pre"><span style="color:#5b6478;user-select:none">' + String(i + 1).padStart(3, ' ') + '  </span>' + escapeHtml(l) + '</div>').join('');
+        head.textContent = f;
+        lastLine = -1;
+        if (curLine > 0) mark(curLine, curActor);      // the state may have arrived before the text
+      };
+      r.send();
+    }
+    function mark(n, actor) {
+      if (n === lastLine) return;
+      const prev = pre.querySelector('.p-line.cur');
+      if (prev) { prev.classList.remove('cur'); prev.style.background = ''; prev.style.color = ''; }
+      const el = pre.querySelector('.p-line[data-n="' + n + '"]');
+      if (el) {
+        el.classList.add('cur'); el.style.background = '#e6edf3'; el.style.color = '#0b0f19';   // inverted
+        const top = el.offsetTop - pre.clientHeight / 2; if (Math.abs(pre.scrollTop - top) > pre.clientHeight / 3) pre.scrollTop = top;
+      }
+      lastLine = n;
+      foot.textContent = 'line ' + n + (actor ? '   actor ' + actor : '');
+    }
+    (function poll() {
+      if (!alive) return;
+      const r = new XMLHttpRequest();
+      r.open('GET', '/api/aipl/state?t=' + Date.now(), true);
+      r.onload = () => {
+        try {
+          const st = JSON.parse(r.responseText);
+          if (st.file && st.file !== file) { file = st.file; loadSrc(file); }
+          if (st.seq !== seq) { seq = st.seq; if (st.line > 0) { curLine = st.line; curActor = st.actor; mark(st.line, st.actor); } }
+          if (st.age_ms > 3000 && lastLine > 0) foot.textContent = 'line ' + lastLine + '   (idle ' + (st.age_ms / 1000 | 0) + ' s)';
+        } catch (e) { /* server restarting */ }
+      };
+      r.send();
+      setTimeout(poll, 100);
+    })();
+    xlog('[aipl] program window opened (trace UDP/9011 -> /api/aipl/state)', 'boot-ok');
   }
 
   // ---- avm Finder ------------------------------------------------------

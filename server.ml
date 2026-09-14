@@ -761,6 +761,111 @@ let mesh_cmd path =
   if host = "" || c = "" then "cmd-error: missing host/c"
   else http_get_lan host port (Printf.sprintf "/%s?cmd=%s" via c)
 
+(* ---- DOFBOT の模型（シミュレータ）------------------------------------------
+   実機の Xinu 板が持つアクター "dofbot"（system/arm.c の文字列命令）と同じ口を、
+   この Mac の中にも置く。AIPL からは住所を 127.0.0.1:9010 にするだけで、
+   同じプログラムが模型に向く。姿勢は「出発・目標・開始時刻・所要 ms」で持ち、
+   デスクトップの窓が /api/arm/sim/state を読んで補間しながら描く。 *)
+let sim_from = Array.make 6 90 and sim_to = Array.make 6 90
+let sim_t0 = ref (Unix.gettimeofday ()) and sim_ms = ref 0 and sim_served = ref 0
+let sim_rgb = ref (0, 0, 0)
+let () = sim_from.(5) <- 30; sim_to.(5) <- 30
+let sim_mutex = Mutex.create ()
+let sim_now_pose () =
+  let k = if !sim_ms <= 0 then 1.0 else min 1.0 ((Unix.gettimeofday () -. !sim_t0) *. 1000.0 /. float_of_int !sim_ms) in
+  Array.init 6 (fun i -> int_of_float (Float.round (float_of_int sim_from.(i) +. (float_of_int (sim_to.(i) - sim_from.(i))) *. k)))
+let sim_begin target ms =
+  let cur = sim_now_pose () in
+  Array.blit cur 0 sim_from 0 6; Array.blit target 0 sim_to 0 6;
+  sim_t0 := Unix.gettimeofday (); sim_ms := ms
+let sim_cmd (line : string) : string =
+  Mutex.lock sim_mutex;
+  let words = List.filter (fun w -> w <> "") (String.split_on_char ' ' (String.map (fun c -> if c = '+' || c = ',' then ' ' else c) (String.trim line))) in
+  let ints l = List.map (fun w -> try int_of_string w with _ -> 0) l in
+  let r = (match words with
+    | "pose" :: rest when List.length rest >= 6 ->
+        let a = Array.of_list (ints rest) in
+        let ms = if Array.length a >= 7 then a.(6) else 1000 in
+        let tgt = Array.init 6 (fun i -> max 0 (min (if i = 4 then 270 else 180) a.(i))) in
+        sim_begin tgt ms; incr sim_served;
+        Printf.sprintf "ok pose %s ms=%d" (String.concat " " (Array.to_list (Array.map string_of_int tgt))) ms
+    | "set" :: rest when List.length rest >= 2 ->
+        let a = Array.of_list (ints rest) in
+        let id = a.(0) and ang = a.(1) and ms = if Array.length a >= 3 then a.(2) else 1000 in
+        if id < 1 || id > 6 then "FAIL set: id 1..6" else begin
+          let tgt = sim_now_pose () in tgt.(id - 1) <- ang; sim_begin tgt ms; incr sim_served;
+          Printf.sprintf "ok set %d -> %d ms=%d" id ang ms end
+    | "read" :: _ -> incr sim_served;
+        "angles " ^ String.concat " " (Array.to_list (Array.map string_of_int (sim_now_pose ())))
+    | "rgb" :: rest -> (match ints rest with r :: g :: b :: _ -> sim_rgb := (r, g, b) | _ -> ()); "ok rgb"
+    | "buzz" :: _ -> "ok buzz"
+    | "torque" :: _ -> "ok torque"
+    | "ping" :: rest -> Printf.sprintf "ping %s -> 218 (ok)" (match rest with x :: _ -> x | [] -> "1")
+    | "ver" :: _ -> "board version 0.sim"
+    | "stat" :: _ -> Printf.sprintf "sim arm served=%d moving=%b" !sim_served
+                       ((Unix.gettimeofday () -. !sim_t0) *. 1000.0 < float_of_int !sim_ms)
+    | _ -> "arm: pose a1..a6 [ms] | set id ang [ms] | read | rgb r g b | buzz n | torque 0|1 | ping id | ver | stat") in
+  Mutex.unlock sim_mutex; r
+let sim_state_json () =
+  Mutex.lock sim_mutex;
+  let arr a = "[" ^ String.concat "," (Array.to_list (Array.map string_of_int a)) ^ "]" in
+  let (r, g, b) = !sim_rgb in
+  let s = Printf.sprintf "{\"from\":%s,\"to\":%s,\"now\":%s,\"t0\":%.3f,\"ms\":%d,\"age_ms\":%d,\"rgb\":[%d,%d,%d],\"served\":%d}"
+            (arr sim_from) (arr sim_to) (arr (sim_now_pose ())) !sim_t0 !sim_ms
+            (int_of_float ((Unix.gettimeofday () -. !sim_t0) *. 1000.0)) r g b !sim_served in
+  Mutex.unlock sim_mutex; s
+
+(* ---- AIPL の実行位置（正典の REPL が UDP/9011 に撒く "PC line col actor file" / "SRC file"）----
+   デスクトップの「AIPL program」窓が /api/aipl/state を 10Hz で読み、いま走っている行を反転する。 *)
+let pc_file = ref "" and pc_line = ref 0 and pc_col = ref 0 and pc_actor = ref "" and pc_seq = ref 0
+let pc_at = ref 0.0
+let pc_mutex = Mutex.create ()
+let trace_listener () =
+  let sock = Unix.socket Unix.PF_INET Unix.SOCK_DGRAM 0 in
+  (try Unix.setsockopt sock Unix.SO_REUSEADDR true with _ -> ());
+  (try Unix.bind sock (Unix.ADDR_INET (Unix.inet_addr_any, 9011));
+       Printf.printf "[aice-avm] AIPL trace listening on UDP 9011\n%!"
+   with e -> Printf.printf "[aice-avm] AIPL trace: UDP 9011 を開けません (%s)\n%!" (Printexc.to_string e));
+  let buf = Bytes.create 2048 in
+  while true do
+    (try
+      let (n, _from) = Unix.recvfrom sock buf 0 (Bytes.length buf) [] in
+      let line = String.trim (Bytes.sub_string buf 0 n) in
+      Mutex.lock pc_mutex;
+      (match String.split_on_char ' ' line with
+       | "PC" :: l :: c :: a :: rest ->
+           pc_line := (try int_of_string l with _ -> 0); pc_col := (try int_of_string c with _ -> 0);
+           pc_actor := a; (match rest with f :: _ when f <> "" -> pc_file := f | _ -> ());
+           incr pc_seq; pc_at := Unix.gettimeofday ()
+       | "SRC" :: f :: _ -> pc_file := f; pc_line := 0; incr pc_seq; pc_at := Unix.gettimeofday ()
+       | _ -> ());
+      Mutex.unlock pc_mutex
+    with _ -> (try Mutex.unlock pc_mutex with _ -> ()))
+  done
+let pc_state_json () =
+  Mutex.lock pc_mutex;
+  let j = Printf.sprintf "{\"file\":%S,\"line\":%d,\"col\":%d,\"actor\":%S,\"seq\":%d,\"age_ms\":%d}"
+            !pc_file !pc_line !pc_col !pc_actor !pc_seq (int_of_float ((Unix.gettimeofday () -. !pc_at) *. 1000.0)) in
+  Mutex.unlock pc_mutex; j
+(* 原稿は Mac のファイルをそのまま読む（同じ機械で REPL が走っている前提）。家の下だけ許す。 *)
+let url_decode (s : string) : string =
+  let b = Buffer.create (String.length s) in
+  let n = String.length s in
+  let hex c = match c with '0'..'9' -> Char.code c - 48 | 'a'..'f' -> Char.code c - 87 | 'A'..'F' -> Char.code c - 55 | _ -> 0 in
+  let i = ref 0 in
+  while !i < n do
+    (match s.[!i] with
+     | '%' when !i + 2 < n -> Buffer.add_char b (Char.chr ((hex s.[!i+1]) * 16 + hex s.[!i+2])); i := !i + 3
+     | '+' -> Buffer.add_char b ' '; incr i
+     | c -> Buffer.add_char b c; incr i)
+  done; Buffer.contents b
+let aipl_src_text file =
+  let file = url_decode file in
+  let home = (try Sys.getenv "HOME" with Not_found -> "/") in
+  if file = "" || not (starts_with file home) || find_sub file ".." >= 0 then "(no program)"
+  else (try let ic = open_in file in let n = in_channel_length ic in let s = really_input_string ic n in close_in ic; s
+        with _ -> "(cannot read " ^ file ^ ")")
+
 let ask_console nbytes =
   Printf.printf "[server] incoming actor binary: %d bytes — accept and run? [y/N] %!" nbytes;
   (try match String.trim (String.lowercase_ascii (input_line stdin)) with
@@ -938,6 +1043,22 @@ let handle rt fd =
       else if starts_with path "/mesh/bench" then http_text (mesh_bench path)
       else if starts_with path "/mesh/loadvm" then http_text (mesh_loadvm path)
       else if starts_with path "/mesh/cmd" then http_text (mesh_cmd path)
+      (* /api/arm?cmd=pose+90+90+90+90+90+30+1000[&host=192.168.3.101] — DOFBOT を載せた
+         Xinu 板の /arm 口へそのまま渡す（板は CORS を返さないので同一生成元で中継）。
+         cmd の '+' は板の側が区切りとして読む。 *)
+      else if starts_with path "/api/aipl/state" then http_json (pc_state_json ())
+      else if starts_with path "/api/aipl/src" then begin
+        let f = str_param path "file" in
+        let f = if f = "" then (Mutex.lock pc_mutex; let x = !pc_file in Mutex.unlock pc_mutex; x) else f in
+        http_text (aipl_src_text f)
+      end
+      else if starts_with path "/api/arm/sim/state" then http_json (sim_state_json ())
+      else if starts_with path "/api/arm/sim" then http_text (sim_cmd (str_param path "cmd") ^ "\n")
+      else if starts_with path "/api/arm" then begin
+        let host = let h = str_param path "host" in if h = "" then "192.168.3.101" else h in
+        let cmd = str_param path "cmd" in
+        http_text (http_get_lan host 80 ("/arm?cmd=" ^ cmd))
+      end
       else if starts_with path "/editor" then http_html editor_page
       else if path = "/graphics" then http_html page
       else serve_static path
@@ -1006,7 +1127,12 @@ let remote_listener rt =
                 (match Avm.remote_dispatch rt ("/" ^ actor) meth
                          (if arg = "" then [] else [arg]) with
                  | Some r -> r
-                 | None -> "err") in
+                 | None ->
+                   (* 模型のアーム。板の "dofbot" と同じ名前・同じメソッド。 *)
+                   if (actor = "dofbot" || actor = "simarm") && meth = "cmd" then sim_cmd arg
+                   else if (actor = "dofbot" || actor = "simarm") && meth = "served" then string_of_int !sim_served
+                   else "err") in
+            if Hashtbl.length answered > 4000 then Hashtbl.reset answered;
             Hashtbl.replace answered key v;
             (* reqid 0 は broadcast(...) の印。返事を出さない。
                ここで返すと、撒いた一通に対して全員が返して嵐になる。 *)
@@ -1044,6 +1170,7 @@ let () =
   (* Open the Xinu desktop UI in the browser right away (respects --no-open). *)
   open_browser ();
   ignore (Thread.create (fun () -> try remote_listener rt with _ -> ()) ());
+  ignore (Thread.create (fun () -> try trace_listener () with _ -> ()) ());
   while true do
     let (fd, _) = Unix.accept s in
     (* don't leak this client fd into a child spawned by /api/restart *)
