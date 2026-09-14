@@ -33,10 +33,10 @@
   function focusWindowFromHash() {
     const key = (location.hash || '').replace('#', '').toLowerCase();
     if (!key) return;
-    if (key === 'arm' || key === 'aipl') {   // deep-links: /#arm = DOFBOT window (+ program), /#aipl = program only
+    if (key === 'arm' || key === 'arm-xinu' || key === 'aipl') {   // deep-links: /#arm = DOFBOT window (+ program), /#aipl = program only
       setTimeout(() => {
         const has = (t) => windows.some((w) => w.win.querySelector('.t').textContent === t);
-        if (key === 'arm' && !has('DOFBOT arm')) openArm({ x: 20, y: 30 });
+        if ((key === 'arm' || key === 'arm-xinu') && !has('DOFBOT arm')) openArm({ x: 20, y: 30 });
         if (!has('AIPL program')) openAiplProgram({});
       }, 600);
       return;
@@ -2366,7 +2366,10 @@
       '<canvas class="a-canvas" width="300" height="240" style="background:#05080e;border:1px solid #2b3650;border-radius:8px;flex:1;min-width:0;cursor:grab"></canvas>' +
       '<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:4px">' +
       '<img class="a-cam" alt="camera" style="width:100%;flex:1;min-height:0;object-fit:contain;background:#05080e;border:1px solid #2b3650;border-radius:8px">' +
-      '<div style="display:flex;gap:4px;font-size:11px;color:#8b949e;align-items:center"><span>📷</span><input class="a-camurl" value="http://192.168.3.19:8090" style="flex:1;font-size:11px;background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px;padding:2px 4px"><span class="a-fps">–</span></div>' +
+      '<canvas class="a-xcam" width="160" height="120" style="width:100%;flex:1;min-height:0;object-fit:contain;background:#05080e;border:1px solid #2b3650;border-radius:8px;display:none;image-rendering:pixelated"></canvas>' +
+      '<div style="display:flex;gap:4px;font-size:11px;color:#8b949e;align-items:center"><span>📷</span>' +
+      '<select class="a-camsrc" style="font-size:11px;background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px"><option value="linux">Linux Pi5 (JPEG)</option><option value="xinu">Xinu Pi5 (UVC driver)</option></select>' +
+      '<input class="a-camurl" value="http://192.168.3.19:8090" style="flex:1;font-size:11px;background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px;padding:2px 4px"><span class="a-fps">–</span></div>' +
       '</div></div>' +
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px">' +
       slider(0, '1 base', 180) + slider(1, '2 shoulder', 180) + slider(2, '3 elbow', 180) + slider(3, '4 wrist', 180) + slider(4, '5 roll', 270) + slider(5, '6 grip', 180) +
@@ -2454,7 +2457,38 @@
     let shown = 0, t0 = Date.now();
     img.addEventListener('load', () => { shown++; if (Date.now() - t0 > 2000) { fps.textContent = (shown * 1000 / (Date.now() - t0)).toFixed(1) + ' fps'; shown = 0; t0 = Date.now(); } });
     img.addEventListener('error', () => { fps.textContent = 'no camera'; });
-    (function pollCam() { if (!alive) return; img.src = camurl.value.replace(/\/$/, '') + '/snap.jpg?t=' + Date.now(); setTimeout(pollCam, 200); })();
+    const camsrc = node.querySelector('.a-camsrc'), xcam = node.querySelector('.a-xcam');
+    camsrc.addEventListener('change', () => {
+      const x = camsrc.value === 'xinu';
+      img.style.display = x ? 'none' : ''; xcam.style.display = x ? '' : 'none';
+      camurl.value = x ? 'http://' + host.value.trim() : 'http://192.168.3.19:8090';
+      fps.textContent = '–';
+    });
+    if ((location.hash || '').toLowerCase().indexOf('xinu') >= 0) { camsrc.value = 'xinu'; camsrc.dispatchEvent(new Event('change')); }   // /#arm-xinu
+    (function pollCam() {
+      if (!alive) return;
+      if (camsrc.value !== 'xinu') { img.src = camurl.value.replace(/\/$/, '') + '/snap.jpg?t=' + Date.now(); setTimeout(pollCam, 200); return; }
+      // Xinu's own UVC driver: /cam?w=160 gives "DW DH SRCW SRCH LEN state"; the RGB565
+      // pixels come in 12 KB chunks at /cam?w=160&off=N (CORS on the board).  If the
+      // board says "idle", ask it to start streaming (320x240 @ 10 fps) first.
+      const base = camurl.value.replace(/\/$/, ''), W = 160;
+      const get = (u, bin) => new Promise((res, rej) => { const r = new XMLHttpRequest(); r.open('GET', u, true); if (bin) r.responseType = 'arraybuffer'; r.onload = () => res(r.response); r.onerror = rej; r.timeout = 8000; r.ontimeout = rej; r.send(); });
+      get(base + '/cam?w=' + W + '&t=' + Date.now(), false).then((t) => {
+        const f = String(t).trim().split(/\s+/);
+        if (f[5] === 'idle' || f[2] === '0') { fps.textContent = 'starting…'; return get(base + '/cam/start?frame=3&fps=10', false).then(() => null); }
+        const dw = parseInt(f[0], 10), dh = parseInt(f[1], 10), total = dw * dh * 2;
+        const parts = []; let off = 0;
+        const next = () => off >= total ? Promise.resolve() : get(base + '/cam?w=' + W + '&off=' + off + '&t=' + Date.now(), true).then((ab) => { parts.push(new Uint8Array(ab)); off += 12288; return next(); });
+        return next().then(() => {
+          if (xcam.width !== dw || xcam.height !== dh) { xcam.width = dw; xcam.height = dh; }
+          const ctx2 = xcam.getContext('2d'), id = ctx2.createImageData(dw, dh), d = id.data;
+          let k = 0;
+          parts.forEach((u8) => { for (let i = 0; i + 1 < u8.length && k < dw * dh; i += 2, k++) { const v = u8[i] | (u8[i + 1] << 8); const r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31; d[k * 4] = (r << 3) | (r >> 2); d[k * 4 + 1] = (g << 2) | (g >> 4); d[k * 4 + 2] = (b << 3) | (b >> 2); d[k * 4 + 3] = 255; } });
+          ctx2.putImageData(id, 0, 0);
+          shown++; if (Date.now() - t0 > 2000) { fps.textContent = (shown * 1000 / (Date.now() - t0)).toFixed(1) + ' fps (xinu)'; shown = 0; t0 = Date.now(); }
+        });
+      }).catch(() => { fps.textContent = 'no xinu camera'; }).then(() => { if (alive) setTimeout(pollCam, 50); });
+    })();
     xlog('[arm] DOFBOT window opened (proxy /api/arm -> ' + host.value + ', camera ' + camurl.value + ')', 'boot-ok');
   }
 
