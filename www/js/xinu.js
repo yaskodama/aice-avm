@@ -2368,8 +2368,8 @@
       '<img class="a-cam" alt="camera" style="width:100%;flex:1;min-height:0;object-fit:contain;background:#05080e;border:1px solid #2b3650;border-radius:8px">' +
       '<canvas class="a-xcam" width="160" height="120" style="width:100%;flex:1;min-height:0;object-fit:contain;background:#05080e;border:1px solid #2b3650;border-radius:8px;display:none;image-rendering:pixelated"></canvas>' +
       '<div style="display:flex;gap:4px;font-size:11px;color:#8b949e;align-items:center"><span>📷</span>' +
-      '<select class="a-camsrc" style="font-size:11px;background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px"><option value="linux">Linux Pi5 (JPEG)</option><option value="xinu">Xinu Pi5 (UVC driver)</option></select>' +
-      '<input class="a-camurl" value="http://192.168.3.19:8090" style="flex:1;font-size:11px;background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px;padding:2px 4px"><span class="a-fps">–</span></div>' +
+      '<select class="a-camsrc" style="font-size:11px;background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px"><option value="xinu">Xinu Pi5 (UVC driver)</option><option value="linux">Linux Pi5 (JPEG)</option></select>' +
+      '<input class="a-camurl" value="http://192.168.3.101" style="flex:1;font-size:11px;background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px;padding:2px 4px"><span class="a-fps">–</span></div>' +
       '</div></div>' +
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px">' +
       slider(0, '1 base', 180) + slider(1, '2 shoulder', 180) + slider(2, '3 elbow', 180) + slider(3, '4 wrist', 180) + slider(4, '5 roll', 270) + slider(5, '6 grip', 180) +
@@ -2458,6 +2458,7 @@
     img.addEventListener('load', () => { shown++; if (Date.now() - t0 > 2000) { fps.textContent = (shown * 1000 / (Date.now() - t0)).toFixed(1) + ' fps'; shown = 0; t0 = Date.now(); } });
     img.addEventListener('error', () => { fps.textContent = 'no camera'; });
     const camsrc = node.querySelector('.a-camsrc'), xcam = node.querySelector('.a-xcam');
+    img.style.display = 'none'; xcam.style.display = '';          // default source is the Xinu camera
     camsrc.addEventListener('change', () => {
       const x = camsrc.value === 'xinu';
       img.style.display = x ? 'none' : ''; xcam.style.display = x ? '' : 'none';
