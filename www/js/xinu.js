@@ -2227,7 +2227,7 @@
     if (solid) {
       const light = v3norm({ x: -0.4, y: 0.7, z: -0.7 });
       mesh.faces.map((fc) => ({ fc, zs: fc.idx.reduce((s, i) => s + proj[i].z, 0) / fc.idx.length }))
-        .sort((a, b) => b.zs - a.zs)
+        .sort((a, b) => ((b.fc.back ? 1 : 0) - (a.fc.back ? 1 : 0)) || (b.zs - a.zs))   // "back" faces (a floor) first, then far to near
         .forEach(({ fc }) => {
           const n = v3norm(v3cross(v3sub(rv[fc.idx[1]], rv[fc.idx[0]]), v3sub(rv[fc.idx[2]], rv[fc.idx[0]])));
           const sh = Math.max(0.2, Math.min(1, Math.abs(n.x * light.x + n.y * light.y + n.z * light.z) * 0.85 + 0.25));
@@ -2241,6 +2241,60 @@
       ctx.strokeStyle = '#7dcfff'; ctx.lineWidth = 1;
       mesh.edges.forEach((e) => { const a = proj[e[0]], b = proj[e[1]]; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); });
     }
+  }
+
+  // PLAN overlay (top-left of the CG): the last steps of the running program, the current one inverted.
+  function drawPlan(ctx, canvas, pl) {
+    if (!pl || !pl.items || !pl.items.length) return;
+    const fs = Math.max(11, Math.round(Math.min(canvas.width, canvas.height) / 42)), lh = fs + 5, rows = 10;
+    const items = pl.items.slice(-rows);
+    const cur = pl.items.filter((it) => it.state === 'run').pop();
+    ctx.save();
+    ctx.font = fs + 'px Menlo, monospace';
+    const w = Math.min(canvas.width - 16, fs * 34), h = lh * (items.length + 1) + 8;
+    ctx.fillStyle = 'rgba(5,8,14,0.82)'; ctx.fillRect(8, 8, w, h);
+    ctx.strokeStyle = '#2b3650'; ctx.strokeRect(8.5, 8.5, w, h);
+    ctx.fillStyle = '#8b949e';
+    ctx.fillText('PLAN  ' + pl.seq + ' 手' + (cur ? '   実行中 #' + cur.i : '   (待機)'), 14, 8 + lh - 3);
+    items.forEach((it, k) => {
+      const y = 8 + lh * (k + 2) - 3, isCur = cur && it.i === cur.i;
+      const tag = it.where === 'sim' ? '模型' : '実機';
+      const mark = it.state === 'run' ? '▶' : it.state === 'fail' ? '✗' : it.state === 'none' ? '–' : '✓';   // – = 見つからない
+      const txt = String(it.i).padStart(3, ' ') + ' ' + tag + ' ' + (it.depth ? '  ' : '') + it.cmd;
+      if (isCur) { ctx.fillStyle = '#e6edf3'; ctx.fillRect(10, y - fs + 1, w - 4, lh); }
+      ctx.fillStyle = isCur ? '#0b0f19' : it.state === 'fail' ? '#f85149' : (it.depth || it.state === 'none') ? '#7d8aa3' : (it.where === 'sim' ? '#7dcfff' : '#f0883e');
+      ctx.fillText(mark + txt.slice(0, 44), 14, y);
+      if (!isCur && it.result && it.state === 'fail') { ctx.fillStyle = '#f85149'; ctx.fillText(it.result.slice(0, 18), 14 + fs * 26, y); }
+    });
+    ctx.restore();
+  }
+
+  // Dimension lines over a render3d() picture (same projection as render3d).
+  // Yellow = from the URDF or measured, orange dashed = a guess not measured yet.
+  function drawDims(ctx, canvas, dims, ay, ax, fscale, pads) {
+    if (!dims) return;
+    const W = canvas.width, H = canvas.height, cam = 6, f = 300 * (fscale || 1), S = 0.9;
+    const pr = (p) => { const r = rotPoint({ x: p.x * S, y: p.y * S, z: p.z * S }, ay, ax); const zz = r.z + cam; return { x: W / 2 + f * r.x / zz, y: H / 2 - f * r.y / zz }; };
+    ctx.save();
+    (pads || []).forEach((pd) => {                 // place spots: a dashed square the size of the cube on the floor
+      const q = pd.pts.map(pr);
+      ctx.strokeStyle = pd.color; ctx.lineWidth = 2; ctx.setLineDash([4, 3]);
+      ctx.beginPath(); q.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+    });
+    ctx.font = Math.max(11, Math.round(Math.min(W, H) / 45)) + 'px sans-serif';
+    dims.forEach((d) => {
+      const a = pr(d.a), b = pr(d.b), src = geoSrc(d.key);
+      const col = src === 'guess' ? '#f0883e' : src === 'measured' ? '#3fb950' : '#e3b341';
+      ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.5;
+      ctx.setLineDash(src === 'guess' ? [5, 4] : []);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
+      [a, b].forEach((p) => { ctx.beginPath(); ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2); ctx.fill(); });
+      const mx = (a.x + b.x) / 2 + 6, my = (a.y + b.y) / 2;
+      const t = d.text + (src === 'guess' ? '（仮）' : src === 'measured' ? '（実測）' : '（URDF）');
+      ctx.fillStyle = 'rgba(5,8,14,0.75)'; ctx.fillRect(mx - 2, my - 11, ctx.measureText(t).width + 4, 15);
+      ctx.fillStyle = col; ctx.fillText(t, mx, my);
+    });
+    ctx.restore();
   }
 
   function openDisplay(opts) {
@@ -2293,7 +2347,33 @@
   // of the Linux Pi 5 (cam_service.py, GET /snap.jpg), and (bottom) six
   // sliders.  "送信" writes the pose to the real arm through the server's
   // /api/arm proxy (-> Xinu board /arm), "読む" reads it back, "同期" polls.
-  const ARM_GEO = { H: 0.1075, L: 0.08285, L3: 0.07385, LG: 0.06, BASE: 0.066 };
+  // Dimensions (m).  Loaded from ~/dofbot_pi5/geometry.json through color_service.py (:8091/geo), which
+  // also uses them for its inverse kinematics and for back-projecting the camera image — one source of truth.
+  // GEO_SRC tells where each number came from ("URDF" / "guess" / "measured").
+  const ARM_GEO = { H: 0.1075, L1: 0.08285, L2: 0.08285, L3: 0.07385, LG: 0.06, BASE: 0.066 };
+  const CAMG = { along: 0.0625, up: 0.032, fov: 60 };       // wrist joint -> camera center, along the fingers / toward the upper side
+  const CUBE = { size: 0.035, x: 0.17, rgb: { green: '#2ecc40', blue: '#1f6feb' } };     // the object to grasp (CG); x = home, same as color_service.py
+  // the floor (table top) around the base, and the place spots (base 150° = right / 30° = left, place_r from the base axis)
+  const FLOOR = { front: 0.35, back: 0.15, side: 0.30, place_r: 0.17 };
+  let GEO_JSON = null;
+  const GEO_KEYS = { base_h: [ARM_GEO, 'BASE'], H: [ARM_GEO, 'H'], L1: [ARM_GEO, 'L1'], L2: [ARM_GEO, 'L2'], L3: [ARM_GEO, 'L3'],
+    LG: [ARM_GEO, 'LG'], cam_along: [CAMG, 'along'], cam_up: [CAMG, 'up'], fov: [CAMG, 'fov'], cube: [CUBE, 'size'],
+    floor_front: [FLOOR, 'front'], floor_back: [FLOOR, 'back'], floor_side: [FLOOR, 'side'], place_r: [FLOOR, 'place_r'] };
+  // gripper: servo-6 command -> gap between the fingertips (m), measured with a ruler (geometry.json "grip_cal")
+  let GRIP_CAL = [[90, 0.052], [110, 0.042], [135, 0.028]];
+  function gripGap(s6) {
+    const c = GRIP_CAL;                     // piecewise linear through the measured points, extrapolated at both ends
+    let i = 0; while (i < c.length - 2 && s6 > c[i + 1][0]) i++;
+    const a = c[i], b = c[i + 1];
+    return Math.max(0.004, a[1] + (b[1] - a[1]) * (s6 - a[0]) / (b[0] - a[0]));
+  }
+  function applyGeo(g) {
+    if (!g) return;
+    GEO_JSON = g;
+    if (g.grip_cal && Array.isArray(g.grip_cal.v) && g.grip_cal.v.length >= 2) GRIP_CAL = g.grip_cal.v.slice().sort((x, y) => x[0] - y[0]);
+    Object.keys(GEO_KEYS).forEach((k) => { if (g[k] && Number.isFinite(+g[k].v)) GEO_KEYS[k][0][GEO_KEYS[k][1]] = +g[k].v; });
+  }
+  function geoSrc(k) { return GEO_JSON && GEO_JSON[k] ? GEO_JSON[k].src : 'guess'; }
   function armFk(s) {
     // Servo conventions (Arm_Lib): A1 = 90-s2 from vertical (forward +),
     // A2 = A1 + (90-s3), A3 = A2 + (90-s4).  yaw = s1-90 about the vertical.
@@ -2306,13 +2386,13 @@
     const dir = (A) => ({ x: f.x * Math.sin(A), y: Math.cos(A), z: f.z * Math.sin(A) });
     const add = (p, d, k) => ({ x: p.x + d.x * k, y: p.y + d.y * k, z: p.z + d.z * k });
     const P1 = { x: 0, y: ARM_GEO.H, z: 0 };
-    const P2 = add(P1, dir(A1), ARM_GEO.L);
-    const P3 = add(P2, dir(A2), ARM_GEO.L);
+    const P2 = add(P1, dir(A1), ARM_GEO.L1);
+    const P3 = add(P2, dir(A2), ARM_GEO.L2);
     const P5 = add(P3, dir(A3), ARM_GEO.L3);
     const PG = add(P5, dir(A3), ARM_GEO.LG);
     return { f, l, up, P1, P2, P3, P5, PG, d1: dir(A1), d2: dir(A2), d3: dir(A3), yaw };
   }
-  function armMesh(s) {
+  function armMesh(s, cube) {
     const m = meshBuilder(); m.name = 'DOFBOT';
     const K = 9;                                   // metres -> display units
     const k = armFk(s);
@@ -2331,27 +2411,147 @@
     }
     // table + base + turntable
     const tb = m.verts.length;
-    [[-0.22, -0.006, -0.22], [0.34, -0.006, -0.22], [0.34, -0.006, 0.22], [-0.22, -0.006, 0.22],
-     [-0.22, 0, -0.22], [0.34, 0, -0.22], [0.34, 0, 0.22], [-0.22, 0, 0.22]].forEach((q) => m.verts.push(v3({ x: q[0], y: q[1], z: q[2] })));
-    [[0, 1, 2, 3], [5, 4, 7, 6], [4, 0, 3, 7], [1, 5, 6, 2], [3, 2, 6, 7], [4, 5, 1, 0]].forEach((q) => m.faces.push({ idx: q.map((i) => tb + i), color: '#5a3a22' }));
+    const fb = -FLOOR.back, ff = FLOOR.front, fs = FLOOR.side;
+    [[fb, -0.006, -fs], [ff, -0.006, -fs], [ff, -0.006, fs], [fb, -0.006, fs],
+     [fb, 0, -fs], [ff, 0, -fs], [ff, 0, fs], [fb, 0, fs]].forEach((q) => m.verts.push(v3({ x: q[0], y: q[1], z: q[2] })));
+    [[0, 1, 2, 3], [5, 4, 7, 6], [4, 0, 3, 7], [1, 5, 6, 2], [3, 2, 6, 7], [4, 5, 1, 0]].forEach((q) => m.faces.push({ idx: q.map((i) => tb + i), color: '#5a3a22', back: true }));   // drawn under everything
     segBox({ x: 0, y: 0, z: 0 }, k.up, ARM_GEO.BASE, 0.09, '#3a4257', { x: 1, y: 0, z: 0 });
     segBox({ x: 0, y: ARM_GEO.BASE, z: 0 }, k.up, ARM_GEO.H - ARM_GEO.BASE, 0.05, '#2f9e6f', k.l);
-    segBox(k.P1, k.d1, ARM_GEO.L, 0.032, '#2f9e6f', k.l);          // upper arm
-    segBox(k.P2, k.d2, ARM_GEO.L, 0.03, '#2f9e6f', k.l);           // forearm
+    segBox(k.P1, k.d1, ARM_GEO.L1, 0.032, '#2f9e6f', k.l);         // upper arm
+    segBox(k.P2, k.d2, ARM_GEO.L2, 0.03, '#2f9e6f', k.l);          // forearm
     segBox(k.P3, k.d3, ARM_GEO.L3, 0.034, '#2f9e6f', k.l);         // wrist link
-    // camera on the wrist link (outer side)
-    const camP = { x: k.P3.x + k.d3.x * 0.05, y: k.P3.y + k.d3.y * 0.05, z: k.P3.z + k.d3.z * 0.05 };
+    // camera on the wrist link, upper side (above the fingers when the hand is level): -n3
     const n3 = v3norm(cross(k.d3, k.l));
-    segBox({ x: camP.x + n3.x * 0.022, y: camP.y + n3.y * 0.022, z: camP.z + n3.z * 0.022 }, k.d3, 0.025, 0.02, '#111318', k.l);
-    // gripper: two fingers, gap from s6 (30 open ≈ 5 cm, 135 closed ≈ 1 cm), rotated by s5-90 about the hand axis
-    const gap = Math.max(0.01, 0.05 - (s[5] - 30) / 105 * 0.04);
+    const at = (P, a, u) => ({ x: P.x + k.d3.x * a - n3.x * u, y: P.y + k.d3.y * a - n3.y * u, z: P.z + k.d3.z * a - n3.z * u });
+    segBox(at(k.P3, CAMG.along - 0.0125, CAMG.up), k.d3, 0.025, 0.02, '#111318', k.l);   // camera body, centered on its lens axis
+    // gripper: two fingers, gap from s6 (measured: 90 -> 5.2 cm, 110 -> 4.2 cm, 135 -> 2.8 cm), rotated by s5-90 about the hand axis
+    const gap = gripGap(s[5]);
     const r = (s[4] - 90) * Math.PI / 180;
     const lat5 = v3norm({ x: k.l.x * Math.cos(r) + n3.x * Math.sin(r), y: k.l.y * Math.cos(r) + n3.y * Math.sin(r), z: k.l.z * Math.cos(r) + n3.z * Math.sin(r) });
     [-1, 1].forEach((sg) => {
       const P = { x: k.P5.x + lat5.x * sg * gap / 2, y: k.P5.y + lat5.y * sg * gap / 2, z: k.P5.z + lat5.z * sg * gap / 2 };
       segBox(P, k.d3, ARM_GEO.LG, 0.008, '#c9a227', lat5);
     });
+    // dimension lines (drawn by drawDims over the rendered model): [from, to, label, key]
+    const cm = (v) => (v * 100).toFixed(2).replace(/0$/, '') + ' cm';
+    const side = (P, u) => ({ x: P.x + k.l.x * u, y: P.y + k.l.y * u, z: P.z + k.l.z * u });   // pushed sideways off the link
+    const off = 0.045;
+    const camC = at(k.P3, CAMG.along, CAMG.up), axisC = at(k.P3, CAMG.along, 0);
+    m.dims = [
+      [{ x: 0, y: 0, z: -0.07 }, { x: 0, y: ARM_GEO.BASE, z: -0.07 }, '台座 ' + cm(ARM_GEO.BASE), 'base_h'],
+      [{ x: -0.06, y: 0, z: 0 }, { x: -0.06, y: ARM_GEO.H, z: 0 }, '卓面→肩 ' + cm(ARM_GEO.H), 'H'],
+      [side(k.P1, off), side(k.P2, off), '上腕 ' + cm(ARM_GEO.L1), 'L1'],
+      [side(k.P2, off), side(k.P3, off), '前腕 ' + cm(ARM_GEO.L2), 'L2'],
+      [side(k.P3, off), side(k.P5, off), '手首→指の付け根 ' + cm(ARM_GEO.L3), 'L3'],
+      [side(k.P5, off), side(k.PG, off), '指 ' + cm(ARM_GEO.LG), 'LG'],
+      [side(k.P3, -off), side(axisC, -off), '手首→カメラ ' + cm(CAMG.along), 'cam_along'],
+      [axisC, camC, '指の軸→カメラ中心 ' + cm(CAMG.up) + ' / 画角 ' + CAMG.fov + '°', 'cam_up'],
+    ].map((d) => ({ a: v3(d[0]), b: v3(d[1]), text: d[2], key: d[3] }));
+    // the floor's size and the two place spots (a thin pad the size of the cube, drawn on the table)
+    const y0 = 0.001;
+    m.dims.push(
+      { a: v3({ x: ff, y: y0, z: -fs }), b: v3({ x: ff, y: y0, z: fs }), text: '床の幅 ' + cm(2 * fs), key: 'floor_side' },
+      { a: v3({ x: fb, y: y0, z: fs }), b: v3({ x: ff, y: y0, z: fs }), text: '床の奥行 ' + cm(ff - fb) + '（軸の前 ' + cm(ff) + '）', key: 'floor_front' });
+    [[150, '右の置き場（緑）', '#2ecc40'], [30, '左の置き場（青）', '#1f6feb']].forEach((ps) => {
+      const yaw = (ps[0] - 90) * Math.PI / 180, px = FLOOR.place_r * Math.cos(yaw), pz = -FLOOR.place_r * Math.sin(yaw), h = CUBE.size / 2 + 0.005;
+      m.pads = (m.pads || []).concat([{ color: ps[2],
+        pts: [[px - h, pz - h], [px + h, pz - h], [px + h, pz + h], [px - h, pz + h]].map((q) => v3({ x: q[0], y: y0, z: q[1] })) }]);
+      m.dims.push({ a: v3({ x: 0, y: y0, z: 0 }), b: v3({ x: px, y: y0, z: pz }), text: ps[1] + ' ' + cm(FLOOR.place_r), key: 'place_r' });
+    });
+    // the object to grasp: an axis-aligned cube (CG) — green or blue
+    if (cube) {
+      const h = CUBE.size / 2;
+      segBox({ x: cube.x, y: cube.y - h, z: cube.z }, k.up, CUBE.size, CUBE.size, CUBE.rgb[cube.color], { x: 0, y: 0, z: 1 });
+      m.dims.push({ a: v3({ x: cube.x - h, y: cube.y + h + 0.012, z: cube.z + h }), b: v3({ x: cube.x + h, y: cube.y + h + 0.012, z: cube.z + h }),
+                    text: '立方体の1辺 ' + cm(CUBE.size), key: 'cube' });
+    }
     return m;
+  }
+
+  // ---- the CG cube and the CG wrist camera --------------------------------
+  // The cube starts on the table 17 cm in front of the base axis (CUBE.x).  Closing the
+  // gripper to the cube's width around it picks it up; opening wider drops it on the
+  // table.  cgCamera() renders what the wrist camera of the model sees, so the
+  // sim is recognised from pixels by color_service.py like the real camera.
+  // CUBE (size from geometry.json "cube", home x 0.17 m) is declared with the dimensions above
+  function cubeHome(color) {
+    return { x: CUBE.x, y: CUBE.size / 2, z: 0, color, held: false };
+  }
+  function cubeStep(cube, s) {
+    const k = armFk(s);
+    const g = { x: k.PG.x - k.d3.x * 0.012, y: k.PG.y - k.d3.y * 0.012, z: k.PG.z - k.d3.z * 0.012 };  // between the fingers, 1.2 cm up from the tips
+    // held when the fingers close to the cube's width around it; dropped when they open wider again
+    const gap = gripGap(s[5]);
+    if (!cube.held && gap <= CUBE.size + 0.001 && Math.hypot(g.x - cube.x, g.y - cube.y, g.z - cube.z) < 0.03) cube.held = true;
+    if (cube.held && gap > CUBE.size + 0.004) { cube.held = false; cube.y = CUBE.size / 2; }
+    if (cube.held) { cube.x = g.x; cube.y = Math.max(CUBE.size / 2, g.y); cube.z = g.z; }
+  }
+  function cgCamera(cx, W, H, s, cube) {
+    const k = armFk(s);
+    const n3 = v3norm(v3cross(k.l, k.d3));            // the camera's "up": the wrist's upper side
+    const c = { x: k.P3.x + k.d3.x * CAMG.along + n3.x * CAMG.up, y: k.P3.y + k.d3.y * CAMG.along + n3.y * CAMG.up, z: k.P3.z + k.d3.z * CAMG.along + n3.z * CAMG.up };
+    const fw = k.d3, rt = k.l, upv = n3, f = (W / 2) / Math.tan(CAMG.fov / 2 * Math.PI / 180);   // horizontal field of view
+    const proj = (p) => { const d = { x: p.x - c.x, y: p.y - c.y, z: p.z - c.z };
+      const z = d.x * fw.x + d.y * fw.y + d.z * fw.z;
+      return { u: W / 2 + f * (d.x * rt.x + d.y * rt.y + d.z * rt.z) / z, v: H / 2 - f * (d.x * upv.x + d.y * upv.y + d.z * upv.z) / z, z }; };
+    cx.fillStyle = '#20252e'; cx.fillRect(0, 0, W, H);                    // above the horizon
+    const T = [[-FLOOR.back, -FLOOR.side], [FLOOR.front, -FLOOR.side], [FLOOR.front, FLOOR.side], [-FLOOR.back, FLOOR.side]].map((q) => proj({ x: q[0], y: 0, z: q[1] }));
+    if (T.every((q) => q.z > 0.005)) { cx.fillStyle = '#5a3a22'; cx.beginPath(); T.forEach((q, i) => i ? cx.lineTo(q.u, q.v) : cx.moveTo(q.u, q.v)); cx.fill(); }
+    else if (fw.y < 0) { cx.fillStyle = '#5a3a22'; cx.fillRect(0, 0, W, H); }   // looking down at the table
+    const h = CUBE.size / 2, V = [];
+    for (let i = 0; i < 8; i++) V.push(proj({ x: cube.x + (i & 1 ? h : -h), y: cube.y + (i & 2 ? h : -h), z: cube.z + (i & 4 ? h : -h) }));
+    const faces = [[0, 2, 6, 4, -1, 0, 0], [1, 3, 7, 5, 1, 0, 0], [0, 1, 5, 4, 0, -1, 0], [2, 3, 7, 6, 0, 1, 0], [0, 1, 3, 2, 0, 0, -1], [4, 5, 7, 6, 0, 0, 1]];
+    const base = CUBE.rgb[cube.color], R = parseInt(base.slice(1, 3), 16), G = parseInt(base.slice(3, 5), 16), B = parseInt(base.slice(5, 7), 16);
+    faces.map((q) => ({ q, z: (V[q[0]].z + V[q[1]].z + V[q[2]].z + V[q[3]].z) / 4,
+                        facing: -(q[4] * fw.x + q[5] * fw.y + q[6] * fw.z) }))
+      .filter((o) => o.facing > 0 && o.q.slice(0, 4).every((i) => V[i].z > 0.005))
+      .sort((a, b) => b.z - a.z)
+      .forEach((o) => { const l = 0.55 + 0.45 * o.facing;
+        cx.fillStyle = 'rgb(' + (R * l | 0) + ',' + (G * l | 0) + ',' + (B * l | 0) + ')';
+        cx.beginPath(); o.q.slice(0, 4).forEach((i, j) => j ? cx.lineTo(V[i].u, V[i].v) : cx.moveTo(V[i].u, V[i].v)); cx.closePath(); cx.fill(); });
+  }
+  function geoUrl() { return 'http://' + location.hostname + ':8091/geo'; }
+  function loadGeo(cb) {
+    const r = new XMLHttpRequest();
+    r.open('GET', geoUrl() + '?t=' + Date.now(), true);
+    r.onload = () => { try { applyGeo(JSON.parse(r.responseText)); xlog('[arm] dimensions loaded from color_service /geo', 'boot-ok'); } catch (e) { /* keep defaults */ } if (cb) cb(); };
+    r.onerror = () => { xlog('[arm] color_service :8091 not running — built-in dimensions', 'boot-info'); if (cb) cb(); };
+    r.send();
+  }
+  // edit the dimensions: lengths in cm, the field of view in degrees; "src" says measured / URDF / guess
+  function openGeoEditor() {
+    if (windows.some((w) => w.win.querySelector('.t').textContent === 'DOFBOT 寸法')) return;
+    const g = GEO_JSON || {};
+    const node = document.createElement('div');
+    node.style.cssText = 'display:flex;flex-direction:column;gap:6px;font-size:14px;color:#c0caf5;padding:4px';
+    const row = (k) => {
+      const e = g[k] || { v: GEO_KEYS[k][0][GEO_KEYS[k][1]], src: 'guess', label: k }, isDeg = k === 'fov';
+      const val = isDeg ? e.v : +(e.v * 100).toFixed(3);
+      return '<div style="display:flex;gap:6px;align-items:center"><span style="flex:1">' + escapeHtml(e.label || k) + '</span>' +
+        '<input data-k="' + k + '" class="g-v" value="' + val + '" style="width:70px;background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px;padding:2px 4px">' +
+        '<span style="width:24px">' + (isDeg ? '°' : 'cm') + '</span>' +
+        '<select data-k="' + k + '" class="g-s" style="background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px">' +
+        ['measured', 'URDF', 'guess'].map((o) => '<option value="' + o + '"' + (e.src === o ? ' selected' : '') + '>' + { measured: '実測', URDF: 'URDF', guess: '仮' }[o] + '</option>').join('') +
+        '</select></div>';
+    };
+    node.innerHTML = Object.keys(GEO_KEYS).map(row).join('') +
+      '<div style="display:flex;gap:8px;align-items:center"><button class="g-save">保存（CG と色判定の両方に反映）</button><span class="g-msg" style="color:#8b949e"></span></div>' +
+      '<div style="font-size:12px;color:#8b949e">実測したら値を入れて「実測」にする。保存先: ~/dofbot_pi5/geometry.json</div>';
+    makeWindow({ title: 'DOFBOT 寸法', x: 60, y: 60, w: 520, h: 420, node });
+    node.querySelector('.g-save').addEventListener('click', () => {
+      const out = Object.assign({}, g);
+      node.querySelectorAll('.g-v').forEach((el) => {
+        const k = el.dataset.k, n = parseFloat(el.value);
+        if (!Number.isFinite(n)) return;
+        out[k] = Object.assign({}, g[k] || {}, { v: k === 'fov' ? n : +(n / 100).toFixed(5), src: node.querySelector('.g-s[data-k="' + k + '"]').value });
+      });
+      const r = new XMLHttpRequest();
+      r.open('POST', geoUrl(), true);
+      r.setRequestHeader('Content-Type', 'text/plain');
+      r.onload = () => { applyGeo(out); node.querySelector('.g-msg').textContent = r.responseText.trim() === 'ok' ? '保存しました' : r.responseText; };
+      r.onerror = () => { node.querySelector('.g-msg').textContent = 'color_service :8091 に届きません'; };
+      r.send(JSON.stringify(out));
+    });
   }
   function openArm(opts) {
     const node = document.createElement('div');
@@ -2381,6 +2581,10 @@
       '<label style="font-size:11px;color:#c0caf5"><input type="checkbox" class="a-sync"> 同期</label>' +
       '<label style="font-size:11px;color:#c0caf5">ms <input class="a-ms" value="1000" style="width:48px;font-size:11px;background:#0e1626;color:#d8dee9;border:1px solid #2b3650;border-radius:4px;padding:2px 4px"></label>' +
       '<button data-act="home">全軸90°</button>' +
+      '<label style="font-size:11px;color:#c0caf5"><input type="checkbox" class="a-dims" checked> 寸法</label>' +
+      '<label style="font-size:11px;color:#c0caf5"><input type="checkbox" class="a-planov" checked> PLAN</label>' +
+      '<button data-act="plan-clear">PLAN 消去</button>' +
+      '<button data-act="geo">寸法を編集</button>' +
       '</div>' +
       '<div class="a-status" style="font-size:11px;color:#8b949e;white-space:pre;overflow:hidden;text-overflow:ellipsis">—</div>';
     let alive = true;
@@ -2404,23 +2608,89 @@
     window.addEventListener('mousemove', (e) => { if (!dragging) return; ay += (e.clientX - lx) * 0.01; ax += (e.clientY - ly) * 0.01; lx = e.clientX; ly = e.clientY; });
     window.addEventListener('mouseup', () => { dragging = false; });
     function fit() { const r = canvas.getBoundingClientRect(); if (r.width > 10) { canvas.width = r.width | 0; canvas.height = r.height | 0; } }
+    // CG cube (simulator only) + CG wrist camera → color_service.py :8091/simframe
+    const target = node.querySelector('.a-target');   // 模型 / 実機 (declared before the first frame reads it)
+    const dimsBox = node.querySelector('.a-dims'), planBox = node.querySelector('.a-planov');
+    // PLAN of the running AIPL program (sort.aipl's Dancer.go and color_service's locate/lower moves),
+    // polled from color_service :8091/plan and drawn over the CG — the step being executed is inverted.
+    let planData = null;
+    (function pollPlan() {
+      if (!alive) return;
+      const r = new XMLHttpRequest();
+      r.open('GET', 'http://' + location.hostname + ':8091/plan?t=' + Date.now(), true);
+      r.timeout = 2000;
+      r.onload = () => { try { planData = JSON.parse(r.responseText); } catch (e) { /* ignore */ } };
+      r.send();
+      setTimeout(pollPlan, 300);
+    })();
+    loadGeo();
+    node.querySelector('[data-act=geo]').addEventListener('click', openGeoEditor);
+    let cube = cubeHome('green'), cubeSeq = -1;
+    const cg = document.createElement('canvas'); cg.width = 80; cg.height = 60;
+    const cgx = cg.getContext('2d', { willReadFrequently: true });
     (function frame() {
       if (!alive) return;
       fit();
-      render3d(ctx, canvas, armMesh(angles()), ay, ax, true, Math.min(canvas.width, canvas.height) / 240 * 1.15);
+      const sim = target.value === 'sim';
+      if (sim) cubeStep(cube, angles());
+      const mesh = armMesh(angles(), sim ? cube : null), fsc = Math.min(canvas.width, canvas.height) / 240 * 1.15;
+      render3d(ctx, canvas, mesh, ay, ax, true, fsc);
+      if (dimsBox.checked) drawDims(ctx, canvas, mesh.dims, ay, ax, fsc, mesh.pads);
+      if (planBox.checked) drawPlan(ctx, canvas, planData);
+      if (sim) cgCamera(cgx, cg.width, cg.height, angles(), cube);
       requestAnimationFrame(frame);
+    })();
+    const csvc = 'http://' + location.hostname + ':8091';
+    (function sendCg() {
+      if (!alive) return;
+      if (target.value === 'sim') {
+        const d = cgx.getImageData(0, 0, cg.width, cg.height).data, rgb = new Uint8Array(cg.width * cg.height * 3);
+        for (let i = 0, j = 0; i < d.length; i += 4) { rgb[j++] = d[i]; rgb[j++] = d[i + 1]; rgb[j++] = d[i + 2]; }
+        const r = new XMLHttpRequest(); r.open('POST', csvc + '/simframe?w=' + cg.width + '&h=' + cg.height + '&cx=' + cube.x.toFixed(3) + '&cy=' + cube.y.toFixed(3) + '&cz=' + cube.z.toFixed(3) + '&held=' + (cube.held ? 1 : 0), true);
+        r.setRequestHeader('Content-Type', 'text/plain'); r.send(rgb);
+        // the cube's color / "place again" is decided by color_service (/sim?c=green|blue)
+        const q = new XMLHttpRequest(); q.open('GET', csvc + '/stat?t=' + Date.now(), true);
+        q.onload = () => { try { const c = JSON.parse(q.responseText).cube; if (c && c.seq !== cubeSeq) { cubeSeq = c.seq; cube = cubeHome(c.color); } } catch (e) { /* ignore */ } };
+        q.send();
+      }
+      setTimeout(sendCg, 300);
     })();
     // target: the simulated arm inside this server (/api/arm/sim) or the real
     // arm through the same-origin proxy (/api/arm -> Xinu board /arm)
-    const host = node.querySelector('.a-host'), target = node.querySelector('.a-target');
-    function arm(cmd, cb) {
-      const r = new XMLHttpRequest();
-      const q = cmd.trim().split(/\s+/).join('+');
-      r.open('GET', target.value === 'sim' ? '/api/arm/sim?cmd=' + q
-                                           : '/api/arm?host=' + encodeURIComponent(host.value.trim()) + '&cmd=' + q, true);
-      r.onload = () => { status.textContent = '> ' + cmd + '\n' + r.responseText.trim(); if (cb) cb(r.responseText); };
-      r.onerror = () => { status.textContent = '> ' + cmd + '\n(proxy error)'; };
+    const host = node.querySelector('.a-host');
+    // ---- PLAN: one list for everything — this window's commands, sort.aipl's steps and color_service's
+    //      locate/lower moves all go to color_service (:8091/plan) and are drawn over the CG (drawPlan).
+    const planSvc = 'http://' + location.hostname + ':8091/plan';
+    function planGet(path, cb) {
+      const r = new XMLHttpRequest(); r.open('GET', planSvc + path, true); r.timeout = 2000;
+      r.onload = () => { if (cb) cb(r.responseText.trim()); }; r.onerror = r.ontimeout = () => { if (cb) cb(''); };
       r.send();
+    }
+    function planPush(cmd, where, cb) { planGet('/push?where=' + where + '&cmd=' + encodeURIComponent(cmd + '  (窓)'), cb); }
+    function planDone(id, text) { if (id) planGet('/done?i=' + id + '&r=' + encodeURIComponent((text || '').split('\n')[0].slice(0, 60))); }
+    node.querySelector('[data-act=plan-clear]').addEventListener('click', () => planGet('/reset'));
+
+    function arm(cmd, cb) {
+      const where = target.value;
+      const send = (planId) => {
+        const r = new XMLHttpRequest();
+        const q = cmd.trim().split(/\s+/).join('+');
+        r.open('GET', where === 'sim' ? '/api/arm/sim?cmd=' + q
+                                      : '/api/arm?host=' + encodeURIComponent(host.value.trim()) + '&cmd=' + q, true);
+        r.onload = () => {
+          const t = r.responseText.trim();
+          status.textContent = '> ' + cmd + '\n' + t;
+          planDone(planId, t);
+          if (cb) cb(r.responseText);
+        };
+        r.onerror = () => {
+          status.textContent = '> ' + cmd + '\n(proxy error)';
+          planDone(planId, 'FAIL 応答なし');
+        };
+        r.send();
+      };
+      if (/^read\b/.test(cmd.trim())) send(null);                 // reads (and 同期 polling) are not steps
+      else planPush(cmd, where, (id) => send(id || null));
     }
     function readBack() {
       arm('read', (t) => { const m = /angles\s+(.*)/.exec(t); if (!m) return;
@@ -2466,6 +2736,7 @@
       fps.textContent = '–';
     });
     if ((location.hash || '').toLowerCase().indexOf('xinu') >= 0) { camsrc.value = 'xinu'; camsrc.dispatchEvent(new Event('change')); }   // /#arm-xinu
+    let realSent = 0;
     (function pollCam() {
       if (!alive) return;
       if (camsrc.value !== 'xinu') { img.src = camurl.value.replace(/\/$/, '') + '/snap.jpg?t=' + Date.now(); setTimeout(pollCam, 200); return; }
@@ -2486,11 +2757,65 @@
           let k = 0;
           parts.forEach((u8) => { for (let i = 0; i + 1 < u8.length && k < dw * dh; i += 2, k++) { const v = u8[i] | (u8[i + 1] << 8); const r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31; d[k * 4] = (r << 3) | (r >> 2); d[k * 4 + 1] = (g << 2) | (g >> 4); d[k * 4 + 2] = (b << 3) | (b >> 2); d[k * 4 + 3] = 255; } });
           ctx2.putImageData(id, 0, 0);
+          // hand the same pixels to color_service.py (/realframe) so it never has to ask the board again
+          if (Date.now() - realSent > 300) {
+            realSent = Date.now();
+            const rgb = new Uint8Array(dw * dh * 3);
+            for (let i = 0, j = 0; i < d.length; i += 4) { rgb[j++] = d[i]; rgb[j++] = d[i + 1]; rgb[j++] = d[i + 2]; }
+            const q = new XMLHttpRequest(); q.open('POST', 'http://' + location.hostname + ':8091/realframe?w=' + dw + '&h=' + dh, true);
+            q.setRequestHeader('Content-Type', 'text/plain'); q.send(rgb);
+          }
           shown++; if (Date.now() - t0 > 2000) { fps.textContent = (shown * 1000 / (Date.now() - t0)).toFixed(1) + ' fps (xinu)'; shown = 0; t0 = Date.now(); }
         });
-      }).catch(() => { fps.textContent = 'no xinu camera'; }).then(() => { if (alive) setTimeout(pollCam, 50); });
+      }).catch(() => { fps.textContent = 'no xinu camera'; }).then(() => { if (alive) setTimeout(pollCam, 250); });   // the board serves one HTTP request at a time — leave it room
     })();
     xlog('[arm] DOFBOT window opened (proxy /api/arm -> ' + host.value + ', camera ' + camurl.value + ')', 'boot-ok');
+    openCamCenter(() => alive ? { cg, real: camsrc.value === 'xinu' ? xcam : img } : null);
+  }
+
+  // ---- camera, large, in the middle of the desktop ------------------------
+  // Mirrors the DOFBOT window's camera (canvas or <img>) every frame, so the
+  // board is not asked for pixels a second time.
+  let lastColorStat = null;          // latest color_service.py /stat (polled by the AIPL program window)
+  function openCamCenter(source) {
+    if (windows.some((w) => w.win.querySelector('.t').textContent === 'Camera')) return;
+    const node = document.createElement('div');
+    node.style.cssText = 'height:100%;display:flex;background:#05080e';
+    node.innerHTML = '<canvas class="c-view" width="640" height="480" style="flex:1;min-width:0;image-rendering:pixelated"></canvas>';
+    const W = Math.min(1000, Math.max(480, window.innerWidth * 0.5)), H = Math.round(W * 0.375) + 50;
+    let alive = true;
+    makeWindow({ title: 'Camera', x: Math.max(10, Math.round((window.innerWidth - W) / 2)),
+      y: Math.max(10, Math.round((window.innerHeight - H) / 2) - 20), w: W, h: H, node, onClose: () => { alive = false; } });
+    const cv = node.querySelector('.c-view'), cx = cv.getContext('2d');
+    (function frame() {
+      if (!alive) return;
+      const r = cv.getBoundingClientRect();
+      if (r.width > 10 && (cv.width !== (r.width | 0) || cv.height !== (r.height | 0))) { cv.width = r.width | 0; cv.height = r.height | 0; }
+      const src = source();
+      cx.imageSmoothingEnabled = false;
+      cx.fillStyle = '#05080e'; cx.fillRect(0, 0, cv.width, cv.height);
+      if (src) [[src.cg, 'CG camera (simulator)'], [src.real, 'Xinu camera (real arm)']].forEach((e, i) => {
+        const s = e[0], half = cv.width / 2, top = 22;
+        const sw = s ? (s.naturalWidth || s.width) : 0, sh = s ? (s.naturalHeight || s.height) : 0;
+        cx.fillStyle = '#8b949e'; cx.font = '13px sans-serif'; cx.fillText(e[1], i * half + 8, 16);
+        if (sw > 0 && sh > 0) {
+          const k = Math.min((half - 8) / sw, (cv.height - top) / sh), dw = sw * k, dh = sh * k;
+          try { cx.drawImage(s, i * half + (half - dw) / 2, top + (cv.height - top - dh) / 2, dw, dh); } catch (e2) { /* image not decoded yet */ }
+          // the region color_service.py judged: where the grasp spot appears in this camera
+          // (the camera sits above the fingers, so it is not the image center)
+          const st = lastColorStat, want = i === 0 ? 'sim' : 'real';
+          if (st && st.mode === want && st.roi) {
+            const x0 = i * half + (half - dw) / 2, y0 = top + (cv.height - top - dh) / 2;
+            cx.strokeStyle = st.answer === 'green' ? '#3fb950' : st.answer === 'blue' ? '#388bfd' : '#e3b341';
+            cx.lineWidth = 2; cx.setLineDash([5, 3]);
+            cx.strokeRect(x0 + st.roi[0] * dw, y0 + st.roi[1] * dh, (st.roi[2] - st.roi[0]) * dw, (st.roi[3] - st.roi[1]) * dh);
+            cx.setLineDash([]); cx.lineWidth = 1;
+            cx.fillStyle = cx.strokeStyle; cx.fillText('grasp spot: ' + st.answer, x0 + st.roi[0] * dw, y0 + st.roi[3] * dh + 14);
+          }
+        }
+      });
+      requestAnimationFrame(frame);
+    })();
   }
 
   // ---- AIPL program window ------------------------------------------------
@@ -2504,7 +2829,17 @@
     node.innerHTML =
       '<div class="p-head" style="font-size:13px;color:#8b949e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">(no program yet — run the OCaml REPL)</div>' +
       '<pre class="p-src" style="flex:1;min-height:0;margin:0;overflow:auto;background:#05080e;border:1px solid #2b3650;border-radius:8px;padding:6px 8px;font:14px/1.45 Menlo,monospace;color:#d8dee9"></pre>' +
-      '<div class="p-foot" style="font-size:13px;color:#8b949e">—</div>';
+      '<div class="p-foot" style="font-size:13px;color:#8b949e">—</div>' +
+      // color recognition bars: fed by ~/dofbot_pi5/color_service.py (HTTP :8091/stat)
+      '<div class="p-color" style="border:1px solid #2b3650;border-radius:8px;padding:6px 8px;background:#05080e;font-size:13px;color:#c0caf5">' +
+      '<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span>色の認識率 (掴む所の枠)</span><span class="c-ans" style="font-weight:bold">—</span></div>' +
+      ['green', 'blue'].map((c) =>
+        '<div style="display:flex;align-items:center;gap:6px;margin:3px 0"><span style="width:44px">' + (c === 'green' ? '緑' : '青') + '</span>' +
+        '<div style="flex:1;height:14px;background:#161d2e;border-radius:7px;position:relative;overflow:hidden">' +
+        '<div class="c-bar-' + c + '" style="height:100%;width:0;background:' + (c === 'green' ? '#3fb950' : '#388bfd') + ';border-radius:7px;transition:width .3s"></div>' +
+        '<div style="position:absolute;top:0;bottom:0;left:30%;border-left:1px dashed #8b949e" title="threshold 30%"></div></div>' +
+        '<span class="c-pct-' + c + '" style="width:52px;text-align:right">–</span></div>').join('') +
+      '<div class="c-why" style="font-size:12px;color:#8b949e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">color_service :8091 —</div></div>';
     let alive = true;
     const W = Math.min(760, Math.max(420, window.innerWidth * 0.37)), Hh = Math.min(1120, window.innerHeight - 80);
     makeWindow({ title: 'AIPL program', x: (opts && opts.x != null) ? opts.x : Math.max(20, window.innerWidth - W - 30), y: (opts && opts.y != null) ? opts.y : 30,
@@ -2554,6 +2889,30 @@
       };
       r.send();
       setTimeout(poll, 100);
+    })();
+    const cAns = node.querySelector('.c-ans'), cWhy = node.querySelector('.c-why');
+    (function pollColor() {
+      if (!alive) return;
+      const r = new XMLHttpRequest();
+      r.open('GET', 'http://' + location.hostname + ':8091/stat?t=' + Date.now(), true);
+      r.timeout = 3000;
+      r.onload = () => {
+        try {
+          const st = JSON.parse(r.responseText);
+          lastColorStat = st;
+          ['green', 'blue'].forEach((c) => {
+            node.querySelector('.c-bar-' + c).style.width = Math.min(100, st[c]) + '%';
+            node.querySelector('.c-pct-' + c).textContent = st[c].toFixed(1) + '%';
+          });
+          const name = { green: '緑 → 右へ', blue: '青 → 左へ', none: '色なし' }[st.answer] || '—';
+          cAns.textContent = name;
+          cAns.style.color = st.answer === 'green' ? '#3fb950' : st.answer === 'blue' ? '#388bfd' : '#8b949e';
+          cWhy.textContent = '[' + st.mode + '] #' + st.seq + '  max brightness ' + st.max_v + (st.why ? '  — ' + st.why : '');
+        } catch (e) { /* not JSON yet */ }
+      };
+      r.onerror = r.ontimeout = () => { cWhy.textContent = 'color_service :8091 not running'; };
+      r.send();
+      setTimeout(pollColor, 500);
     })();
     xlog('[aipl] program window opened (trace UDP/9011 -> /api/aipl/state)', 'boot-ok');
   }
