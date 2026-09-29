@@ -2625,6 +2625,17 @@
     function fit() { const r = canvas.getBoundingClientRect(); if (r.width > 10) { canvas.width = r.width | 0; canvas.height = r.height | 0; } }
     // CG cube (simulator only) + CG wrist camera → color_service.py :8091/simframe
     const target = node.querySelector('.a-target');   // 模型 / 実機 (declared before the first frame reads it)
+    // A Web Worker ticks every 50 ms and drives the simulator loops below.  Chrome throttles timers of a
+    // hidden or background window (down to once a minute), which froze the model arm mid-motion and made
+    // color_service see stale CG pictures; worker timers are not throttled that way.
+    const ticker = new Worker(URL.createObjectURL(new Blob(['setInterval(() => postMessage(0), 50);'], { type: 'text/javascript' })));
+    const jobs = [];
+    function every(ms, fn) { jobs.push({ ms, fn, last: 0 }); }
+    ticker.onmessage = () => {
+      if (!alive) { ticker.terminate(); return; }
+      const now = Date.now();
+      jobs.forEach((j) => { if (now - j.last >= j.ms) { j.last = now; try { j.fn(); } catch (e) { /* keep ticking */ } } });
+    };
     const dimsBox = node.querySelector('.a-dims'), planBox = node.querySelector('.a-planov');
     // PLAN of the running AIPL program (sort.aipl's Dancer.go and color_service's locate/lower moves),
     // polled from color_service :8091/plan and drawn over the CG — the step being executed is inverted.
@@ -2657,8 +2668,7 @@
       requestAnimationFrame(frame);
     })();
     const csvc = 'http://' + location.hostname + ':8091';
-    (function sendCg() {
-      if (!alive) return;
+    every(300, function sendCg() {
       if (target.value === 'sim') {
         const d = cgx.getImageData(0, 0, cg.width, cg.height).data, rgb = new Uint8Array(cg.width * cg.height * 3);
         const cur = cube.find((c) => c.held) || cube[0];
@@ -2670,8 +2680,7 @@
         q.onload = () => { try { const c = JSON.parse(q.responseText).cube; if (c && c.seq !== cubeSeq) { cubeSeq = c.seq; cube = cubeHome(c.color); } } catch (e) { /* ignore */ } };
         q.send();
       }
-      setTimeout(sendCg, 300);
-    })();
+    });
     // target: the simulated arm inside this server (/api/arm/sim) or the real
     // arm through the same-origin proxy (/api/arm -> Xinu board /arm)
     const host = node.querySelector('.a-host');
@@ -2721,14 +2730,12 @@
     // the simulated arm: follow the server's motion (from/to/t0/ms) so a pose sent
     // by AIPL (remote_call to 127.0.0.1:9010 "dofbot") animates here at 10 Hz
     let simSeen = 0, simState = null;
-    (function pollSim() {
-      if (!alive) return;
+    every(100, function pollSim() {
       const r = new XMLHttpRequest();
       r.open('GET', '/api/arm/sim/state?t=' + Date.now(), true);
       r.onload = () => { try { simState = JSON.parse(r.responseText); } catch (e) { simState = null; } };
       r.send();
-      setTimeout(pollSim, 100);
-    })();
+    });
     // One step of the simulated arm, the CG cubes and the CG wrist camera.  Run from requestAnimationFrame
     // AND from a 100 ms timer: Chrome stops rAF while the window is hidden or behind others, and then the
     // CG camera kept sending a stale picture (the arm had not moved) — color_service saw "no cube".
@@ -2745,7 +2752,7 @@
       if (target.value === 'sim') { cubeStep(cube, angles()); cgCamera(cgx, cg.width, cg.height, angles(), cube); }
     }
     (function animSim() { if (!alive) return; simTick(); requestAnimationFrame(animSim); })();
-    const simTimer = setInterval(() => { if (!alive) { clearInterval(simTimer); return; } simTick(); }, 100);
+    every(100, simTick);
     // live camera: swap the snapshot ~5 times a second
     const img = node.querySelector('.a-cam'), camurl = node.querySelector('.a-camurl'), fps = node.querySelector('.a-fps');
     let shown = 0, t0 = Date.now();
