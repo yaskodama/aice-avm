@@ -2459,12 +2459,12 @@
       m.dims.push({ a: v3({ x: 0, y: y0, z: 0 }), b: v3({ x: px, y: y0, z: pz }), text: ps[1] + ' ' + cm(FLOOR.place_r), key: 'place_r' });
     });
     // the object to grasp: an axis-aligned cube (CG) — green or blue
-    if (cube) {
+    (cube ? [].concat(cube) : []).forEach((cb, ci) => {       // one cube or a list (green and blue side by side)
       const h = CUBE.size / 2;
-      segBox({ x: cube.x, y: cube.y - h, z: cube.z }, k.up, CUBE.size, CUBE.size, CUBE.rgb[cube.color], { x: 0, y: 0, z: 1 });
-      m.dims.push({ a: v3({ x: cube.x - h, y: cube.y + h + 0.012, z: cube.z + h }), b: v3({ x: cube.x + h, y: cube.y + h + 0.012, z: cube.z + h }),
+      segBox({ x: cb.x, y: cb.y - h, z: cb.z }, k.up, CUBE.size, CUBE.size, CUBE.rgb[cb.color], { x: 0, y: 0, z: 1 });
+      if (ci === 0) m.dims.push({ a: v3({ x: cb.x - h, y: cb.y + h + 0.012, z: cb.z + h }), b: v3({ x: cb.x + h, y: cb.y + h + 0.012, z: cb.z + h }),
                     text: '立方体の1辺 ' + cm(CUBE.size), key: 'cube' });
-    }
+    });
     return m;
   }
 
@@ -2475,9 +2475,21 @@
   // sim is recognised from pixels by color_service.py like the real camera.
   // CUBE (size from geometry.json "cube", home x 0.17 m) is declared with the dimensions above
   function cubeHome(color) {
-    return { x: CUBE.x, y: CUBE.size / 2, z: 0, color, held: false };
+    const at = (c, base) => { const yaw = (base - 90) * Math.PI / 180;
+      return { x: CUBE.x * Math.cos(yaw), y: CUBE.size / 2, z: -CUBE.x * Math.sin(yaw), color: c, held: false }; };
+    if (color === 'both') return [at('green', 100), at('blue', 80)];   // side by side, 5.9 cm apart
+    return [at(color, 90)];
   }
-  function cubeStep(cube, s) {
+  function cubeStep(cubes, s) {
+    // at most one cube is in the hand: keep it, else see whether the fingers closed on one
+    const cube = cubes.find((c) => c.held) || cubes.find((c) => !c.held && cubeGrab(c, s)) || null;
+    if (cube) cubeFollow(cube, s);
+  }
+  function cubeGrab(cube, s) {
+    const k = armFk(s), g = { x: k.PG.x - k.d3.x * 0.012, y: k.PG.y - k.d3.y * 0.012, z: k.PG.z - k.d3.z * 0.012 };
+    return gripGap(s[5]) <= CUBE.size + 0.001 && Math.hypot(g.x - cube.x, g.y - cube.y, g.z - cube.z) < 0.03;
+  }
+  function cubeFollow(cube, s) {
     const k = armFk(s);
     const g = { x: k.PG.x - k.d3.x * 0.012, y: k.PG.y - k.d3.y * 0.012, z: k.PG.z - k.d3.z * 0.012 };  // between the fingers, 1.2 cm up from the tips
     // held when the fingers close to the cube's width around it; dropped when they open wider again
@@ -2486,7 +2498,7 @@
     if (cube.held && gap > CUBE.size + 0.004) { cube.held = false; cube.y = CUBE.size / 2; }
     if (cube.held) { cube.x = g.x; cube.y = Math.max(CUBE.size / 2, g.y); cube.z = g.z; }
   }
-  function cgCamera(cx, W, H, s, cube) {
+  function cgCamera(cx, W, H, s, cubes) {
     const k = armFk(s);
     const n3 = v3norm(v3cross(k.l, k.d3));            // the camera's "up": the wrist's upper side
     const c = { x: k.P3.x + k.d3.x * CAMG.along + n3.x * CAMG.up, y: k.P3.y + k.d3.y * CAMG.along + n3.y * CAMG.up, z: k.P3.z + k.d3.z * CAMG.along + n3.z * CAMG.up };
@@ -2498,7 +2510,9 @@
     const T = [[-FLOOR.back, -FLOOR.side], [FLOOR.front, -FLOOR.side], [FLOOR.front, FLOOR.side], [-FLOOR.back, FLOOR.side]].map((q) => proj({ x: q[0], y: 0, z: q[1] }));
     if (T.every((q) => q.z > 0.005)) { cx.fillStyle = '#5a3a22'; cx.beginPath(); T.forEach((q, i) => i ? cx.lineTo(q.u, q.v) : cx.moveTo(q.u, q.v)); cx.fill(); }
     else if (fw.y < 0) { cx.fillStyle = '#5a3a22'; cx.fillRect(0, 0, W, H); }   // looking down at the table
-    const h = CUBE.size / 2, V = [];
+    const h = CUBE.size / 2;
+    [].concat(cubes).map((cube) => ({ cube, d: proj(cube).z })).sort((a, b) => b.d - a.d).forEach(({ cube }) => {   // far cube first
+    const V = [];
     for (let i = 0; i < 8; i++) V.push(proj({ x: cube.x + (i & 1 ? h : -h), y: cube.y + (i & 2 ? h : -h), z: cube.z + (i & 4 ? h : -h) }));
     const faces = [[0, 2, 6, 4, -1, 0, 0], [1, 3, 7, 5, 1, 0, 0], [0, 1, 5, 4, 0, -1, 0], [2, 3, 7, 6, 0, 1, 0], [0, 1, 3, 2, 0, 0, -1], [4, 5, 7, 6, 0, 0, 1]];
     const base = CUBE.rgb[cube.color], R = parseInt(base.slice(1, 3), 16), G = parseInt(base.slice(3, 5), 16), B = parseInt(base.slice(5, 7), 16);
@@ -2509,6 +2523,7 @@
       .forEach((o) => { const l = 0.55 + 0.45 * o.facing;
         cx.fillStyle = 'rgb(' + (R * l | 0) + ',' + (G * l | 0) + ',' + (B * l | 0) + ')';
         cx.beginPath(); o.q.slice(0, 4).forEach((i, j) => j ? cx.lineTo(V[i].u, V[i].v) : cx.moveTo(V[i].u, V[i].v)); cx.closePath(); cx.fill(); });
+    });
   }
   function geoUrl() { return 'http://' + location.hostname + ':8091/geo'; }
   function loadGeo(cb) {
@@ -2632,12 +2647,10 @@
       if (!alive) return;
       fit();
       const sim = target.value === 'sim';
-      if (sim) cubeStep(cube, angles());
       const mesh = armMesh(angles(), sim ? cube : null), fsc = Math.min(canvas.width, canvas.height) / 240 * 1.15;
       render3d(ctx, canvas, mesh, ay, ax, true, fsc);
       if (dimsBox.checked) drawDims(ctx, canvas, mesh.dims, ay, ax, fsc, mesh.pads);
       if (planBox.checked) drawPlan(ctx, canvas, planData);
-      if (sim) cgCamera(cgx, cg.width, cg.height, angles(), cube);
       requestAnimationFrame(frame);
     })();
     const csvc = 'http://' + location.hostname + ':8091';
@@ -2645,8 +2658,9 @@
       if (!alive) return;
       if (target.value === 'sim') {
         const d = cgx.getImageData(0, 0, cg.width, cg.height).data, rgb = new Uint8Array(cg.width * cg.height * 3);
+        const cur = cube.find((c) => c.held) || cube[0];
         for (let i = 0, j = 0; i < d.length; i += 4) { rgb[j++] = d[i]; rgb[j++] = d[i + 1]; rgb[j++] = d[i + 2]; }
-        const r = new XMLHttpRequest(); r.open('POST', csvc + '/simframe?w=' + cg.width + '&h=' + cg.height + '&cx=' + cube.x.toFixed(3) + '&cy=' + cube.y.toFixed(3) + '&cz=' + cube.z.toFixed(3) + '&held=' + (cube.held ? 1 : 0), true);
+        const r = new XMLHttpRequest(); r.open('POST', csvc + '/simframe?w=' + cg.width + '&h=' + cg.height + '&cx=' + cur.x.toFixed(3) + '&cy=' + cur.y.toFixed(3) + '&cz=' + cur.z.toFixed(3) + '&held=' + (cur.held ? 1 : 0) + '&a=' + angles().join(','), true);
         r.setRequestHeader('Content-Type', 'text/plain'); r.send(rgb);
         // the cube's color / "place again" is decided by color_service (/sim?c=green|blue)
         const q = new XMLHttpRequest(); q.open('GET', csvc + '/stat?t=' + Date.now(), true);
@@ -2712,16 +2726,23 @@
       r.send();
       setTimeout(pollSim, 100);
     })();
-    (function animSim() {
+    // One step of the simulated arm, the CG cubes and the CG wrist camera.  Run from requestAnimationFrame
+    // AND from a 100 ms timer: Chrome stops rAF while the window is hidden or behind others, and then the
+    // CG camera kept sending a stale picture (the arm had not moved) — color_service saw "no cube".
+    let simDone = -1;
+    function simTick() {
       if (!alive) return;
-      if (simState && target.value === 'sim' && (simState.served !== simSeen || simState.age_ms < simState.ms + 300)) {
-        const k = simState.ms <= 0 ? 1 : Math.min(1, (simState.age_ms + (Date.now() - simState._at || 0)) / simState.ms);
+      if (simState && target.value === 'sim' && simState.served !== simDone) {
         if (simState._at == null) simState._at = Date.now();
+        const k = simState.ms <= 0 ? 1 : Math.min(1, (simState.age_ms + (Date.now() - simState._at)) / simState.ms);
         setAngles(simState.from.map((f, i) => Math.round(f + (simState.to[i] - f) * k)));
+        if (k >= 1) simDone = simState.served;          // reached: apply the final pose once, then leave the sliders alone
         if (simState.served !== simSeen) { simSeen = simState.served; status.textContent = '[sim] served=' + simSeen + '  to ' + simState.to.join(' ') + '  ms=' + simState.ms; }
       }
-      requestAnimationFrame(animSim);
-    })();
+      if (target.value === 'sim') { cubeStep(cube, angles()); cgCamera(cgx, cg.width, cg.height, angles(), cube); }
+    }
+    (function animSim() { if (!alive) return; simTick(); requestAnimationFrame(animSim); })();
+    const simTimer = setInterval(() => { if (!alive) { clearInterval(simTimer); return; } simTick(); }, 100);
     // live camera: swap the snapshot ~5 times a second
     const img = node.querySelector('.a-cam'), camurl = node.querySelector('.a-camurl'), fps = node.querySelector('.a-fps');
     let shown = 0, t0 = Date.now();
