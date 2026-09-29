@@ -2352,7 +2352,7 @@
   // GEO_SRC tells where each number came from ("URDF" / "guess" / "measured").
   const ARM_GEO = { H: 0.1075, L1: 0.08285, L2: 0.08285, L3: 0.07385, LG: 0.06, BASE: 0.066 };
   const CAMG = { along: 0.0625, up: 0.032, fov: 60 };       // wrist joint -> camera center, along the fingers / toward the upper side
-  const CUBE = { size: 0.035, x: 0.17, rgb: { green: '#2ecc40', blue: '#1f6feb' } };     // the object to grasp (CG); x = home, same as color_service.py
+  const CUBE = { size: 0.030, x: 0.17, rgb: { green: '#2ecc40', blue: '#1f6feb' } };     // the object to grasp (CG); x = home, same as color_service.py
   // the floor (table top) around the base, and the place spots (base 150° = right / 30° = left, place_r from the base axis)
   const FLOOR = { front: 0.35, back: 0.15, side: 0.30, place_r: 0.17 };
   let GEO_JSON = null;
