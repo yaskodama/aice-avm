@@ -2529,8 +2529,8 @@
   function loadGeo(cb) {
     const r = new XMLHttpRequest();
     r.open('GET', geoUrl() + '?t=' + Date.now(), true);
-    r.onload = () => { try { applyGeo(JSON.parse(r.responseText)); xlog('[arm] dimensions loaded from color_service /geo', 'boot-ok'); } catch (e) { /* keep defaults */ } if (cb) cb(); };
-    r.onerror = () => { xlog('[arm] color_service :8091 not running — built-in dimensions', 'boot-info'); if (cb) cb(); };
+    r.onload = () => { let ok = false; try { applyGeo(JSON.parse(r.responseText)); ok = true; } catch (e) { /* keep defaults */ } if (cb) cb(ok); };
+    r.onerror = () => { if (cb) cb(false); };
     r.send();
   }
   // edit the dimensions: lengths in cm, the field of view in degrees; "src" says measured / URDF / guess
@@ -2638,7 +2638,10 @@
       r.send();
       setTimeout(pollPlan, 300);
     })();
-    loadGeo();
+    // dimensions: retry until color_service answers (it may be restarting when the page loads — the CG then
+    // kept the built-in 6 cm fingers and could not grasp), then re-read every 30 s to follow edits
+    let geoOk = false;
+    (function geoLoop() { if (!alive) return; loadGeo((ok) => { geoOk = ok; }); setTimeout(geoLoop, geoOk ? 30000 : 3000); })();
     node.querySelector('[data-act=geo]').addEventListener('click', openGeoEditor);
     let cube = cubeHome('green'), cubeSeq = -1;
     const cg = document.createElement('canvas'); cg.width = 80; cg.height = 60;
