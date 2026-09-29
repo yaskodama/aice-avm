@@ -2760,38 +2760,28 @@
       fps.textContent = '–';
     });
     if ((location.hash || '').toLowerCase().indexOf('xinu') >= 0) { camsrc.value = 'xinu'; camsrc.dispatchEvent(new Event('change')); }   // /#arm-xinu
-    let realSent = 0;
     (function pollCam() {
       if (!alive) return;
       if (camsrc.value !== 'xinu') { img.src = camurl.value.replace(/\/$/, '') + '/snap.jpg?t=' + Date.now(); setTimeout(pollCam, 200); return; }
-      // Xinu's own UVC driver: /cam?w=160 gives "DW DH SRCW SRCH LEN state"; the RGB565
-      // pixels come in 12 KB chunks at /cam?w=160&off=N (CORS on the board).  If the
-      // board says "idle", ask it to start streaming (320x240 @ 10 fps) first.
-      const base = camurl.value.replace(/\/$/, ''), W = 160;
-      const get = (u, bin) => new Promise((res, rej) => { const r = new XMLHttpRequest(); r.open('GET', u, true); if (bin) r.responseType = 'arraybuffer'; r.onload = () => res(r.response); r.onerror = rej; r.timeout = 8000; r.ontimeout = rej; r.send(); });
-      get(base + '/cam?w=' + W + '&t=' + Date.now(), false).then((t) => {
-        const f = String(t).trim().split(/\s+/);
-        if (f[5] === 'idle' || f[2] === '0') { fps.textContent = 'starting…'; return get(base + '/cam/start?frame=3&fps=10', false).then(() => null); }
-        const dw = parseInt(f[0], 10), dh = parseInt(f[1], 10), total = dw * dh * 2;
-        const parts = []; let off = 0;
-        const next = () => off >= total ? Promise.resolve() : get(base + '/cam?w=' + W + '&off=' + off + '&t=' + Date.now(), true).then((ab) => { parts.push(new Uint8Array(ab)); off += 12288; return next(); });
-        return next().then(() => {
-          if (xcam.width !== dw || xcam.height !== dh) { xcam.width = dw; xcam.height = dh; }
-          const ctx2 = xcam.getContext('2d'), id = ctx2.createImageData(dw, dh), d = id.data;
-          let k = 0;
-          parts.forEach((u8) => { for (let i = 0; i + 1 < u8.length && k < dw * dh; i += 2, k++) { const v = u8[i] | (u8[i + 1] << 8); const r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31; d[k * 4] = (r << 3) | (r >> 2); d[k * 4 + 1] = (g << 2) | (g >> 4); d[k * 4 + 2] = (b << 3) | (b >> 2); d[k * 4 + 3] = 255; } });
-          ctx2.putImageData(id, 0, 0);
-          // hand the same pixels to color_service.py (/realframe) so it never has to ask the board again
-          if (Date.now() - realSent > 300) {
-            realSent = Date.now();
-            const rgb = new Uint8Array(dw * dh * 3);
-            for (let i = 0, j = 0; i < d.length; i += 4) { rgb[j++] = d[i]; rgb[j++] = d[i + 1]; rgb[j++] = d[i + 2]; }
-            const q = new XMLHttpRequest(); q.open('POST', 'http://' + location.hostname + ':8091/realframe?w=' + dw + '&h=' + dh, true);
-            q.setRequestHeader('Content-Type', 'text/plain'); q.send(rgb);
-          }
-          shown++; if (Date.now() - t0 > 2000) { fps.textContent = (shown * 1000 / (Date.now() - t0)).toFixed(1) + ' fps (xinu)'; shown = 0; t0 = Date.now(); }
-        });
-      }).catch(() => { fps.textContent = 'no xinu camera'; }).then(() => { if (alive) setTimeout(pollCam, 250); });   // the board serves one HTTP request at a time — leave it room
+      // The Xinu board's camera, relayed by color_service.py (it is the only client of the board's /cam).
+      // The window used to fetch /cam from the board itself; Chrome then kept idle connections open to the
+      // board's :80 and the single-threaded Xinu HTTP stopped answering (several times on 2026-09-28/29).
+      const r = new XMLHttpRequest();
+      r.open('GET', 'http://' + location.hostname + ':8091/realframe.bin?t=' + Date.now(), true);
+      r.responseType = 'arraybuffer'; r.timeout = 4000;
+      r.onload = () => {
+        const u8 = new Uint8Array(r.response || new ArrayBuffer(0));
+        const dw = parseInt(r.getResponseHeader('X-W'), 10), dh = parseInt(r.getResponseHeader('X-H'), 10);
+        if (!(dw > 0 && dh > 0 && u8.length >= dw * dh * 3)) { fps.textContent = 'no xinu camera'; return; }
+        if (xcam.width !== dw || xcam.height !== dh) { xcam.width = dw; xcam.height = dh; }
+        const ctx2 = xcam.getContext('2d'), id = ctx2.createImageData(dw, dh), d = id.data;
+        for (let k = 0; k < dw * dh; k++) { d[k * 4] = u8[k * 3]; d[k * 4 + 1] = u8[k * 3 + 1]; d[k * 4 + 2] = u8[k * 3 + 2]; d[k * 4 + 3] = 255; }
+        ctx2.putImageData(id, 0, 0);
+        shown++; if (Date.now() - t0 > 2000) { fps.textContent = (shown * 1000 / (Date.now() - t0)).toFixed(1) + ' fps (xinu, age ' + r.getResponseHeader('X-Age') + ' s)'; shown = 0; t0 = Date.now(); }
+      };
+      r.onerror = r.ontimeout = () => { fps.textContent = 'color_service :8091 not running'; };
+      r.onloadend = () => { if (alive) setTimeout(pollCam, 300); };
+      r.send();
     })();
     xlog('[arm] DOFBOT window opened (proxy /api/arm -> ' + host.value + ', camera ' + camurl.value + ')', 'boot-ok');
     openCamCenter(() => alive ? { cg, real: camsrc.value === 'xinu' ? xcam : img } : null);
