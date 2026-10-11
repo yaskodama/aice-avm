@@ -457,6 +457,8 @@ let compile_method ~fields ~params (body : stmt) : string =
            print の中の連結は emit_print が書式として組み立て時に解決するので
            ここには来ない（ヒープを使わずに済む）。 *)
         ce a; ce c; u8 0x15
+    (* 等しい・等しくない は VM の EQ/NE が文字列の中身で比べる。 *)
+    | Bin (("==" | "!=") as op, a, c) -> ce a; ce c; u8 (binop_code op)
     | Bin (op, a, c) when has_string (Bin (op, a, c)) ->
         failwith ("avm: 文字列に " ^ op ^ " は使えない（連結は ++ だけ）")
     | Bin (op, a, c) -> ce a; ce c; u8 (binop_code op)
@@ -541,6 +543,7 @@ let compile_method ~fields ~params (body : stmt) : string =
         ce (Bin ("!=", r, Int vm_err)); jump 0x31 l_d;
         ce r; jump 0x30 l_end; place l_d; ce d; place l_end
     | Call ("ai_call", [a]) -> ce a; u8 0x52
+    | Call ("arm_cmd", [a]) -> ce a; u8 0x63
     | Call ("print", [a]) -> emit_print a
     | Str s ->
         (* 文字列の値は「0x40000000 | 文字列表の添字」で表す。命令は増やさない。

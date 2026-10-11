@@ -806,6 +806,8 @@ let sim_cmd (line : string) : string =
                        ((Unix.gettimeofday () -. !sim_t0) *. 1000.0 < float_of_int !sim_ms)
     | _ -> "arm: pose a1..a6 [ms] | set id ang [ms] | read | rgb r g b | buzz n | torque 0|1 | ping id | ver | stat") in
   Mutex.unlock sim_mutex; r
+let () = Avm.arm_cmd_fwd := sim_cmd
+
 let sim_state_json () =
   Mutex.lock sim_mutex;
   let arr a = "[" ^ String.concat "," (Array.to_list (Array.map string_of_int a)) ^ "]" in

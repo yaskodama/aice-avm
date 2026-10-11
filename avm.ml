@@ -169,9 +169,26 @@ let vm_falsy v  = if vm_is_bool v then v land 1 = 0 else v = 0
 
 (* 実行時に作られた文字列の置き場。連結（CONCAT）だけが使う。
    回収は無い（この VM に GC は無い）ので、上限に達したら印にして止める。 *)
-let vm_heap_max = 256
+(* 同じ文字列は同じ置き場を使い回す（モバイルエージェントは一歩ごとに同じ命令文字列を
+   作るので、使い回さないと 256 個の置き場を数十歩で使い切っていた）。 *)
+let vm_heap_max = 1 lsl 20
 let vm_heap : string array = Array.make vm_heap_max ""
 let vm_heap_n = ref 0
+let vm_heap_ix : (string, int) Hashtbl.t = Hashtbl.create 1024
+let vm_heap_mutex = Mutex.create ()
+let vm_heap_put (s : string) : int =
+  Mutex.lock vm_heap_mutex;
+  let i = match Hashtbl.find_opt vm_heap_ix s with
+    | Some i -> i
+    | None ->
+      if !vm_heap_n >= vm_heap_max then vm_heap_max - 1
+      else begin
+        let i = !vm_heap_n in vm_heap.(i) <- s; incr vm_heap_n;
+        Hashtbl.replace vm_heap_ix s i; i
+      end in
+  Mutex.unlock vm_heap_mutex; i
+(* 主の機械の腕。模型では server.ml が sim_cmd を差し込む。 *)
+let arm_cmd_fwd : (string -> string) ref = ref (fun _ -> "FAIL arm_cmd: no arm on this host")
 
 let vm_remote_value_fwd : (string -> int) ref = ref (fun _ -> 0)
 let vm_remote_value _rt t = !vm_remote_value_fwd t
@@ -366,12 +383,7 @@ let vm_intern_fwd s = !vm_intern_fwd_ref s
 
 let vm_concat rt a b =
   let s = vm_show rt a ^ vm_show rt b in
-  if !vm_heap_n >= vm_heap_max then vm_str_tag lor vm_str_heap lor (vm_heap_max - 1)
-  else begin
-    let i = !vm_heap_n in
-    vm_heap.(i) <- s; incr vm_heap_n;
-    vm_str_tag lor vm_str_heap lor i
-  end
+  vm_str_tag lor vm_str_heap lor (vm_heap_put s)
 
 (* Run one method body of `actor` for an incoming (sender, method, args). *)
 let rec exec rt actor sender meth args =
@@ -422,10 +434,14 @@ let rec exec rt actor sender meth args =
              push (vm_bool (if vm_is_flt a || vm_is_flt b then vm_fltval a >  vm_fltval b else a >  b))
          | 0x23 -> let b = pop () in let a = pop () in
              push (vm_bool (if vm_is_flt a || vm_is_flt b then vm_fltval a >= vm_fltval b else a >= b))
+         (* 文字列どうしは中身で比べる。モジュールの文字列表の "none" と、相手から
+            届いて実行時ヒープに置かれた "none" は番号が違う。 *)
          | 0x24 -> let b = pop () in let a = pop () in
-             push (vm_bool (if vm_is_flt a || vm_is_flt b then vm_fltval a =  vm_fltval b else a =  b))
+             push (vm_bool (if vm_is_str a && vm_is_str b then vm_show rt a = vm_show rt b
+                            else if vm_is_flt a || vm_is_flt b then vm_fltval a =  vm_fltval b else a =  b))
          | 0x25 -> let b = pop () in let a = pop () in
-             push (vm_bool (if vm_is_flt a || vm_is_flt b then vm_fltval a <> vm_fltval b else a <> b))
+             push (vm_bool (if vm_is_str a && vm_is_str b then vm_show rt a <> vm_show rt b
+                            else if vm_is_flt a || vm_is_flt b then vm_fltval a <> vm_fltval b else a <> b))
          (* 浮動小数リテラル: 次の 8 バイトが IEEE754 のビット列（下位から） *)
          | 0x5E ->
              let bits = ref 0L in
@@ -548,6 +564,9 @@ let rec exec rt actor sender meth args =
          (* AI_CALL: このホスト VM はモデルを持たない。実機（Pi3）はカーネルに
             焼き込んだ stories260K で推論する。ここでは黙って嘘をつかず、
             モデルが無いと分かる文字列を返す。 *)
+         (* ARM_CMD: 主の機械の腕に文字列命令を渡す（実機 Xinu の arm_cmd と同じ口）。 *)
+         | 0x63 -> let c = vm_show rt (pop ()) in
+                   push (vm_intern_fwd (!arm_cmd_fwd c))
          | 0x52 -> let p = pop () in
                    push (vm_concat rt (vm_intern_fwd "(no local model on host) ") p)
          | 0x44 -> let fi = u16 code !pc in pc := !pc + 2;
@@ -630,12 +649,7 @@ let loadrun rt (data : bytes) : int =
    recovered — is the original .abcl comments and local-variable names; class /
    method / field-count and the complete instruction stream ARE recovered. *)
 (* HTTP から来た文字列を VM の値にする *)
-let vm_intern (s : string) : int =
-  if !vm_heap_n >= vm_heap_max then vm_str_tag lor vm_str_heap lor (vm_heap_max - 1)
-  else begin
-    let i = !vm_heap_n in vm_heap.(i) <- s; incr vm_heap_n;
-    vm_str_tag lor vm_str_heap lor i
-  end
+let vm_intern (s : string) : int = vm_str_tag lor vm_str_heap lor (vm_heap_put s)
 
 (* 相手が描いた文字列を値に読み直す。型は運んでいない ―― 正典の型検査器が
    両側の型を合わせている前提で成り立つ約束である（実機 3 台と同じ規則）。 *)
@@ -734,7 +748,7 @@ let disassemble (data : bytes) : string =
             | 0x05 -> "SELF" | 0x06 -> "SENDER" | 0x07 -> "WAIT" | 0x08 -> "DUP"
             | 0x10 -> "ADD" | 0x11 -> "SUB" | 0x12 -> "MUL" | 0x13 -> "DIV" | 0x14 -> "MOD"
             | 0x15 -> "CONCAT"
-            | 0x60 -> "NEIGHBORS" | 0x61 -> "BROADCAST" | 0x62 -> "GATHER"
+            | 0x60 -> "NEIGHBORS" | 0x61 -> "BROADCAST" | 0x62 -> "GATHER" | 0x63 -> "ARMCMD"
             | 0x50 -> "WEBLISTEN" | 0x51 -> "WEBEXPOSE"
             | 0x20 -> "LT" | 0x21 -> "LE" | 0x22 -> "GT" | 0x23 -> "GE" | 0x24 -> "EQ" | 0x25 -> "NE"
             | 0x30 -> Printf.sprintf "JMP     -> %d" (rd16 ())
