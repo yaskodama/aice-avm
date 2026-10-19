@@ -2474,9 +2474,13 @@
   // table.  cgCamera() renders what the wrist camera of the model sees, so the
   // sim is recognised from pixels by color_service.py like the real camera.
   // CUBE (size from geometry.json "cube", home x 0.17 m) is declared with the dimensions above
-  function cubeHome(color) {
-    const at = (c, base) => { const yaw = (base - 90) * Math.PI / 180;
-      return { x: CUBE.x * Math.cos(yaw), y: CUBE.size / 2, z: -CUBE.x * Math.sin(yaw), color: c, held: false }; };
+  function cubeHome(color, where) {
+    const at = (c, base, r) => { const yaw = (base - 90) * Math.PI / 180, d = r || CUBE.x;
+      return { x: d * Math.cos(yaw), y: CUBE.size / 2, z: -d * Math.sin(yaw), color: c, held: false }; };
+    // where = "green:17:90,blue:15:70" (cm from the base axis, base angle): put the CG cubes where a trial put the real ones
+    const placed = (where || '').split(',').map((w) => w.split(':')).filter((w) => w.length === 3 && CUBE.rgb[w[0]])
+      .map((w) => at(w[0], +w[2], +w[1] / 100));
+    if (placed.length) return placed;
     if (color === 'both') return [at('green', 100), at('blue', 80)];   // side by side, 5.9 cm apart
     return [at(color, 90)];
   }
@@ -2673,11 +2677,12 @@
         const d = cgx.getImageData(0, 0, cg.width, cg.height).data, rgb = new Uint8Array(cg.width * cg.height * 3);
         const cur = cube.find((c) => c.held) || cube[0];
         for (let i = 0, j = 0; i < d.length; i += 4) { rgb[j++] = d[i]; rgb[j++] = d[i + 1]; rgb[j++] = d[i + 2]; }
-        const r = new XMLHttpRequest(); r.open('POST', csvc + '/simframe?w=' + cg.width + '&h=' + cg.height + '&cx=' + cur.x.toFixed(3) + '&cy=' + cur.y.toFixed(3) + '&cz=' + cur.z.toFixed(3) + '&held=' + (cur.held ? 1 : 0) + '&a=' + angles().join(','), true);
+        const r = new XMLHttpRequest(); r.open('POST', csvc + '/simframe?w=' + cg.width + '&h=' + cg.height + '&cx=' + cur.x.toFixed(3) + '&cy=' + cur.y.toFixed(3) + '&cz=' + cur.z.toFixed(3) + '&held=' + (cur.held ? 1 : 0) + '&a=' + angles().join(',')
+          + '&cubes=' + cube.map((c) => c.color + ':' + c.x.toFixed(3) + ',' + c.y.toFixed(3) + ',' + c.z.toFixed(3) + ',' + (c.held ? 1 : 0)).join(';'), true);   // every CG cube, for the dock's gate
         r.setRequestHeader('Content-Type', 'text/plain'); r.send(rgb);
         // the cube's color / "place again" is decided by color_service (/sim?c=green|blue)
         const q = new XMLHttpRequest(); q.open('GET', csvc + '/stat?t=' + Date.now(), true);
-        q.onload = () => { try { const c = JSON.parse(q.responseText).cube; if (c && c.seq !== cubeSeq) { cubeSeq = c.seq; cube = cubeHome(c.color); } } catch (e) { /* ignore */ } };
+        q.onload = () => { try { const c = JSON.parse(q.responseText).cube; if (c && c.seq !== cubeSeq) { cubeSeq = c.seq; cube = cubeHome(c.color, c.at); } } catch (e) { /* ignore */ } };
         q.send();
       }
     });
